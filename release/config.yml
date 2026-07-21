@@ -1,0 +1,6 @@
+# Autogeneriert von release-base-tool.sh - Konfiguration des Live-Helpers.
+# Kein Riot-API-Key noetig: der Live-Helper liest nur die lokale
+# Live Client Data API (:2999) und die mitgelieferte Wissensbasis.
+app:
+  refresh_seconds: 15   # Auto-Refresh-Intervall des Frontends (Sekunden)
+  auto_asset_download: true

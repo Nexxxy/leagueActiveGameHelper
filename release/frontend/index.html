@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>League Active Game Helper</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1319; --card: #1a2029; --border: #2a3342;
+    --text: #dbe4f0; --muted: #8494ab; --accent: #4fc3f7;
+    --aggressive: #ef7b66; --defensive: #64b5f6; --balanced: #9ccc65;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text);
+         font: 15px/1.5 "Segoe UI", system-ui, sans-serif; padding: 20px; }
+  h1 { font-size: 1.2rem; margin-bottom: 4px; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--muted); margin: 20px 0 8px; }
+  .top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: .85rem; }
+  #refreshBtn { background: var(--card); color: var(--accent);
+                border: 1px solid var(--border); border-radius: 50%;
+                width: 30px; height: 30px; font-size: 1rem; cursor: pointer;
+                line-height: 1; }
+  #refreshBtn:hover { border-color: var(--accent); }
+  #refreshBtn.spin { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .card { background: var(--card); border: 1px solid var(--border);
+          border-radius: 10px; padding: 12px 14px; }
+  .stance { display: inline-block; padding: 2px 10px; border-radius: 20px;
+            font-weight: 600; font-size: .8rem; color: #10141a; }
+  .stance.aggressive { background: var(--aggressive); }
+  .stance.defensive  { background: var(--defensive); }
+  .stance.balanced   { background: var(--balanced); }
+  #next.card { border-color: var(--accent); margin-bottom: 4px;
+               display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  #next .itemname { font-size: 1.25rem; font-weight: 700; color: var(--accent); }
+  #next .gold { font-variant-numeric: tabular-nums; font-weight: 600; }
+  #next .gold.ok { color: var(--balanced); }
+  #next .gold.missing { color: var(--aggressive); }
+  #next .swap { font-weight: 600; color: var(--aggressive); }
+  /* Kaufplan-Leiste (Feature 001): Icon-Schritte direkt unter dem Next-Block. */
+  #plan { display: flex; align-items: center; gap: 4px; margin: 6px 0 2px;
+          overflow-x: auto; padding: 2px 0 6px; }
+  #plan .step { flex: none; border-radius: 8px; background: #10151d;
+                border: 2px solid transparent; padding: 3px; line-height: 0; }
+  #plan .step img { display: block; border-radius: 6px; }
+  #plan .step-final img { width: 68px; height: 68px; }      /* -10% vom 64px Next-Icon */
+  #plan .step-component img { width: 45px; height: 45px; }  /* ~-30% -> klar kleiner als Finals */
+  #plan .step.afford { border-color: #f0c419;               /* goldener Ring, kraeftiger */
+                       box-shadow: 0 0 9px rgba(240, 196, 25, .7); }
+  #plan .step.upgrade { border-style: dashed; border-color: var(--balanced); }
+  #plan .chevron { flex: none; color: var(--muted); font-weight: 700;
+                   font-size: 1.1rem; }
+  #confidence { margin: 2px 0 6px; }
+  #confidence .badge { display: inline-block; padding: 2px 10px; border-radius: 20px;
+            font-weight: 600; font-size: .72rem; background: var(--aggressive);
+            color: #10141a; margin-right: 8px; }
+  #building { margin: 6px 0 2px; }
+  #building .building { color: var(--balanced); font-weight: 600; }
+  #recs .card { margin-bottom: 8px; display: flex; gap: 12px; align-items: baseline; }
+  #recs .card.alt { opacity: .68; }   /* zweite Boots-Option (Sichtbarkeit) */
+  #recs .item { font-weight: 600; min-width: 180px; }
+  #recs .kind { font-size: .7rem; text-transform: uppercase; color: var(--accent); min-width: 80px; }
+  .iicon { width: 56px; height: 56px; border-radius: 6px; flex: none; align-self: center; }
+  #next .iicon { width: 64px; height: 64px; }
+  .tag { display: inline-block; font-size: .68rem; font-weight: 700;
+         text-transform: uppercase; letter-spacing: .03em; padding: 2px 8px;
+         border-radius: 6px; background: var(--accent); color: #10141a;
+         white-space: nowrap; }
+  #recs .tag { min-width: 96px; text-align: center; flex: none; }
+  .tag.off { background: var(--balanced); }   /* Damage-Tags (Power/DPS) gruen */
+  .src-class { display: inline-block; font-size: .64rem; font-weight: 700;
+         text-transform: uppercase; letter-spacing: .03em; padding: 1px 7px;
+         border-radius: 6px; border: 1px solid var(--border); color: var(--muted);
+         white-space: nowrap; }
+  .spike { font-size: .78rem; font-weight: 600; color: var(--aggressive);
+           margin: 2px 0; }
+  .spike.high { color: #ff5252; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .enemy .name { font-weight: 600; display: flex; justify-content: space-between; }
+  .enemy .profile { color: var(--accent); font-size: .8rem; }
+  .bar { height: 6px; border-radius: 3px; background: #345; margin: 6px 0;
+         overflow: hidden; display: flex; }
+  .bar .ad { background: #ef7b66; height: 100%; }
+  .bar .ap { background: #7e97f7; height: 100%; }
+  .threat { font-variant-numeric: tabular-nums; }
+  select { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+           border-radius: 6px; padding: 2px 6px; margin-top: 6px; }
+  .itemlist { font-size: .78rem; color: var(--muted); margin-top: 6px; }
+  #nogame { margin-top: 40px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+  <div class="top">
+    <h1>League Active Game Helper</h1>
+    <span class="muted" id="meta"></span>
+    <span class="muted" id="countdown"></span>
+    <button id="refreshBtn" title="Jetzt aktualisieren" onclick="refresh()">&#10227;</button>
+  </div>
+
+  <div id="nogame" hidden>Kein aktives Spiel gefunden – warte auf Spielstart …</div>
+
+  <div id="game" hidden>
+    <h2>Du</h2>
+    <div class="card" id="me"></div>
+    <div id="building"></div>
+
+    <h2>N&auml;chstes Item</h2>
+    <div id="confidence"></div>
+    <div class="card" id="next"></div>
+
+    <div id="planblock" hidden>
+      <h2>Item-Timeline</h2>
+      <div id="plan"></div>
+    </div>
+
+    <h2>Empfehlungen</h2>
+    <div id="stanceline" style="margin-bottom:8px"></div>
+    <div id="recs"></div>
+
+    <h2>Gegner (nach Threat sortiert)</h2>
+    <div class="grid" id="enemies"></div>
+  </div>
+
+<script>
+const PRIOS = ["low", "medium", "high", "urgent"];
+
+// HTML-Escaping fuer interpolierte API-Strings (v.a. Champion-Namen). Ohne das
+// brechen Apostroph-Champions (Kha'Zix, Cho'Gath, Vel'Koz, K'Sante ...) das
+// Markup bzw. inline-Handler auf.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Buzzword-Tag: Damage-Tags (Power/DPS/Lethality) gruen, Konter-/Defensiv-Tags
+// im Akzent (Burn/%HP wirkt wie Anti-Tank -> Akzent; "Anti-Burst" nicht gruen).
+function tagClass(t) { return /Power|DPS|Lethality/.test(t) ? "tag off" : "tag"; }
+
+async function setPriority(champion, priority) {
+  await fetch("/api/priority", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({champion, priority}),
+  });
+  refresh();
+}
+
+function enemyCard(e, spike) {
+  const ad = Math.round(e.damage_split.ad * 100);
+  const ap = Math.round(e.damage_split.ap * 100);
+  const opts = PRIOS.map(p =>
+    `<option value="${p}" ${p === e.priority ? "selected" : ""}>${p}</option>`).join("");
+  const spikeLine = spike
+    ? `<div class="spike ${spike.urgency}" title="Item-Vorsprung">⚡ ${spike.message}</div>`
+    : "";
+  return `<div class="card enemy">
+    <div class="name"><span>${esc(e.name)}
+      ${e.role ? `<span class="muted">${esc(e.role)}</span>` : ""}</span>
+      <span class="threat" title="Anteil an der Team-Bedrohung (inkl. deiner Prio)">⚠ ${e.threat_share != null ? Math.round(e.threat_share * 100) + " %" : e.threat_score}</span></div>
+    ${spikeLine}
+    <div class="profile">${esc(e.build_profile)} · ${e.gold_spent} G · KDA ${e.kda}</div>
+    <div class="bar"><div class="ad" style="width:${ad}%"></div>
+                     <div class="ap" style="width:${ap}%"></div></div>
+    <div class="muted">${ad}% AD / ${ap}% AP</div>
+    <label class="muted">Prio:
+      <select class="prio" data-champion="${esc(e.name)}">${opts}</select></label>
+    <div class="itemlist">${esc(e.items.join(", ")) || "keine Items"}</div>
+  </div>`;
+}
+
+function render(s) {
+  if (s.refresh_seconds) REFRESH_MS = s.refresh_seconds * 1000;
+  const game = s.phase === "in_game" || s.phase === "post_game";
+  document.getElementById("nogame").hidden = game;
+  document.getElementById("game").hidden = !game;
+  let meta = `Patch ${s.patch}`;
+  if (game) meta += ` · ${Math.floor(s.game_time / 60)} min`;
+  if (s.phase === "post_game") meta += " · Spiel beendet – letzter Stand";
+  document.getElementById("meta").textContent = meta;
+  if (!game) return;
+
+  const p = s.player, r = s.recommendations;
+  document.getElementById("me").innerHTML =
+    `<b>${p.name}</b> <span class="muted">${p.role}</span> ·
+     ${p.scores.kills}/${p.scores.deaths}/${p.scores.assists} ·
+     ${p.gold_spent} G ausgegeben
+     <div class="itemlist">${p.items.join(", ") || "keine Items"}</div>`;
+
+  const b = r.building;
+  document.getElementById("building").innerHTML = b
+    ? `<span class="building">🔧 Du baust bereits <b>${b.item}</b>
+       <span class="muted">(${b.components.join(", ")}) – noch ${b.remaining} G
+       ${b.meta ? "" : "· untypisch für diese Rolle"}</span></span>`
+    : "";
+
+  const n = r.next;
+  if (n) {
+    const rest = n.cost_remaining !== undefined ? n.cost_remaining : n.cost;
+    const price = rest < n.cost
+      ? `${rest} G (${n.cost} G, davon ${n.cost - rest} G durch Teilitems gedeckt)`
+      : `${n.cost} G`;
+    let gold = price;
+    if (n.current_gold !== undefined) {
+      const missing = rest - n.current_gold - (n.sell_value || 0);
+      gold = n.affordable
+        ? `<span class="gold ok">${price} – kaufbar (du hast ${n.current_gold} G${n.sell_value ? ` + ${n.sell_value} G aus dem Verkauf` : ""})</span>`
+        : `<span class="gold missing">${price} – es fehlen ${missing} G${n.sell_value ? ` (Verkauf von ${n.sell_item} eingerechnet)` : ""}</span>`;
+    }
+    if (n.sell_item) {
+      gold = `<span class="swap">↺ ${n.sell_item} verkaufen</span> ${gold}`;
+    }
+    document.getElementById("next").innerHTML =
+      `${s.assets_available && n.item_id ? `<img class="iicon" src="assets/items/${n.item_id}.png" alt="" onerror="this.remove()">` : ""}
+       <span class="itemname">${n.item}</span>
+       ${n.tag ? `<span class="${tagClass(n.tag)}">${n.tag}</span>` : ""} ${gold}
+       <span class="muted">${n.reason}</span>`;
+  } else {
+    document.getElementById("next").innerHTML = r.note
+      ? `<span class="muted">${r.note}</span>`
+      : '<span class="muted">Build komplett – nichts mehr offen.</span>';
+  }
+
+  // Kaufplan-Leiste (Feature 001): hartes Feature-Gate - nur mit Assets UND Plan.
+  // Faellt das Gate, wird der ganze Block inkl. "Item-Timeline"-Ueberschrift
+  // ausgeblendet (hidden am Container, analog #nogame/#game).
+  const plan = r.purchase_plan;
+  const planEl = document.getElementById("plan");
+  const gate = s.assets_available && plan && plan.length;
+  document.getElementById("planblock").hidden = !gate;
+  if (gate) {
+    planEl.innerHTML = plan.map((st, i) => {
+      const cls = ["step", st.final ? "step-final" : "step-component"];
+      if (st.upgrade) cls.push("upgrade");
+      else if (st.affordable) cls.push("afford");
+      const title = st.upgrade
+        ? `${esc(st.name)} · Quest-Upgrade – kostenlos`
+        : `${esc(st.name)} · ${st.cost} G`;
+      const chev = i > 0 ? `<span class="chevron">›</span>` : "";
+      return `${chev}<div class="${cls.join(" ")}" title="${title}">
+        <img src="assets/items/${st.item_id}.png" alt="" onerror="this.remove()"></div>`;
+    }).join("");
+  } else {
+    planEl.innerHTML = "";
+  }
+
+  document.getElementById("confidence").innerHTML =
+    (r.confidence && r.confidence !== "rich" && r.confidence_note)
+      ? `<span class="badge">Basis-Empfehlung</span>
+         <span class="muted">${r.confidence_note}</span>`
+      : "";
+
+  document.getElementById("stanceline").innerHTML =
+    `<span class="stance ${r.stance}">${r.stance}</span>
+     <span class="muted"> ${r.stance_reason}
+     (Datenbasis: ${r.knowledge_games} High-Elo-Spiele)</span>`
+    + (r.stance_note ? `<div class="muted" style="font-size:0.85em">${r.stance_note}</div>` : "");
+
+  document.getElementById("recs").innerHTML = r.items.map(i =>
+    `<div class="card${i.alternative ? " alt" : ""}"><span class="kind">${i.kind}</span>
+     ${s.assets_available && i.item_id ? `<img class="iicon" src="assets/items/${i.item_id}.png" alt="" onerror="this.remove()">` : ""}
+     <span class="item">${i.item}</span>
+     ${i.tag ? `<span class="${tagClass(i.tag)}">${i.tag}</span>` : `<span class="tag" style="visibility:hidden">-</span>`}
+     ${i.source === "class" ? `<span class="src-class" title="aus Klassen-Daten (Fallback bei duenner Datenlage)">Klasse</span>` : ""}
+     <span class="muted">${i.reason}</span></div>`).join("")
+    || '<div class="muted">Keine offenen Empfehlungen – Build komplett.</div>';
+
+  const spikes = {};
+  (r.spike_warnings || []).forEach(w => { spikes[w.name] = w; });
+  document.getElementById("enemies").innerHTML =
+    s.enemies.map(e => enemyCard(e, spikes[e.name])).join("");
+}
+
+let REFRESH_MS = 60000;   // Default; der Server liefert app.refresh_seconds aus config.yml mit
+let nextRefreshAt = Date.now() + REFRESH_MS;
+
+async function refresh() {
+  const btn = document.getElementById("refreshBtn");
+  btn.classList.add("spin");
+  try {
+    const resp = await fetch("/api/state");
+    render(await resp.json());
+  } catch (err) { /* Server weg -> beim naechsten Tick erneut versuchen */ }
+  finally { btn.classList.remove("spin"); }
+  nextRefreshAt = Date.now() + REFRESH_MS;
+}
+
+// Delegierter Listener statt Inline-onchange (Fix Apostroph-Champions): am
+// Container registriert, ueberlebt jedes innerHTML-Neurendern der Karten.
+document.getElementById("enemies").addEventListener("change", ev => {
+  const sel = ev.target.closest("select.prio");
+  if (sel) setPriority(sel.dataset.champion, sel.value);
+});
+
+setInterval(() => {
+  const remain = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1000));
+  document.getElementById("countdown").textContent = `⟳ in ${remain}s`;
+  if (remain === 0) refresh();
+}, 1000);
+refresh();
+</script>
+</body>
+</html>

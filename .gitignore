@@ -1,0 +1,4 @@
+release/.venv/
+release/server.pid
+release/server.port
+release/smoketest.log
