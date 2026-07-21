@@ -2,3 +2,4 @@ release/.venv/
 release/server.pid
 release/server.port
 release/smoketest.log
+release/currentGameInfo.yaml
