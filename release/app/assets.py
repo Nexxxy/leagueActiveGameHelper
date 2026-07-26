@@ -9,9 +9,9 @@ Manuell nutzbar via  ``python -m app.assets``.
 
 import requests
 
-from pipeline.config import ROOT
-from pipeline.ddragon import BASE
-from . import items
+from core.config import ROOT
+from core.ddragon import BASE
+from engine import items
 
 # frontend/assets/items/<id>.png - statisch vom Server gemountet.
 ASSETS_DIR = ROOT / "frontend" / "assets" / "items"

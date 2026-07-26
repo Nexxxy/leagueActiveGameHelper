@@ -4,8 +4,8 @@ import re
 from collections import Counter
 from functools import lru_cache
 
-from pipeline import ddragon
-from pipeline.config import Config
+from core import ddragon
+from core.config import Config
 
 # EINE kanonische Tag-Taxonomie (Fix 5.6): AD/AP/DEF. Einzige Quelle fuer die
 # Schadenstyp-Einordnung im gesamten app-Code (categorize_gold, recommend.

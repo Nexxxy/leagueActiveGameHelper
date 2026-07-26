@@ -17,9 +17,9 @@ def _canonical_ids() -> dict:
     Riot-interne Casing ab ('FiddleSticks' in Live/Match-V5 vs. 'Fiddlesticks'
     in Data Dragon) - an der Wurzel, damit alle exakt vergleichenden Lookups
     (recommend._HEALING_THREATS, champions.prior_for_id/bucket_for_id) treffen."""
-    from pipeline import ddragon
-    from pipeline.config import Config
-    from pipeline.ddragon import _simplify
+    from core import ddragon
+    from core.config import Config
+    from core.ddragon import _simplify
     version = ddragon.latest_version()
     data = ddragon.champions(version, Config.load().cache_dir)["data"]
     return {_simplify(info["id"]): info["id"] for info in data.values()}
@@ -29,7 +29,7 @@ def _canonicalize_id(cid: str) -> str:
     """Roh-ID gegen die bekannten Data-Dragon-IDs kanonisieren; trifft der
     vereinfachte Vergleich nichts (unbekannter Champion / kein Cache), bleibt die
     Roh-ID unveraendert (Fallback-Verhalten)."""
-    from pipeline.ddragon import _simplify
+    from core.ddragon import _simplify
     try:
         return _canonical_ids().get(_simplify(cid), cid)
     except Exception:
@@ -69,7 +69,7 @@ def verified_champion_id(player: dict) -> str | None:
     Katalog-Zugriff selbst fehl (kein Cache / offline), greift das alte
     Verhalten als Fallback und es kommt NIE None zurueck (sonst wuerde der
     Server jeden Spieler verwerfen)."""
-    from pipeline.ddragon import _simplify
+    from core.ddragon import _simplify
     raw = player.get("rawChampionName") or ""
     display = player.get("championName", "?")
     try:

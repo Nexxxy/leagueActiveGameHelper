@@ -121,6 +121,14 @@ class Config:
     dump_interval_seconds: int = 5  # Poller-Kadenz bei aktivem Dump (Sekunden)
     cache_dir: Path = field(default_factory=lambda: ROOT / "data" / "pipeline")
     out_dir: Path = field(default_factory=lambda: ROOT / "knowledge" / "generated")
+    postgame_out_dir: Path = field(default_factory=lambda: ROOT / "postgame")
+    postgame_auto_on_end: bool = True   # Auto-Report bei Spielende (nur Voll-Modus:
+                                        # greift nur mit Key + me, sonst No-Op)
+    postgame_poll_interval_seconds: int = 20  # Kadenz der Spielende-Erkennung (Sek.)
+    postgame_enrich_retries: int = 20   # Stufe-2-Versuche, bis Match indexiert ist
+    postgame_enrich_backoff_seconds: int = 30  # Wartezeit zwischen den Versuchen
+                                        # (Default 20x30 s ~ 10 min Gesamtbudget)
+    me: str = ""                    # eigene Identitaet: Riot-ID 'Name#Tag' ODER PUUID
     api_key: str = ""
     dev_api_key: str = ""
     round_robin: bool = False
@@ -144,6 +152,32 @@ class Config:
         if self.round_robin:
             return keys
         return keys[:1]
+
+    @property
+    def postgame_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """(primary, fallback)-Keys fuer Postgame-Fetches (Match/Timeline,
+        --latest, Enrichment). Unabhaengig von den Crawl-Keys (active_api_keys).
+
+        Dev-Key-Vorrang (Nutzer-Entscheidung 2026-07-24): laeuft parallel ein
+        langer Pipeline-Crawl (`focus` etc.) mit dem Haupt-`api_key`, sollen die
+        Postgame-Fetches dessen Rate-Limit-Budget (100 Req/2 min) NICHT
+        anknabbern -> sie bevorzugen den `dev_api_key`.
+
+        - `round_robin: true` -> beide Keys wie die Crawls (`active_api_keys`),
+          KEIN Dev-Vorrang und kein Fallback; wer round_robin einschaltet, will
+          die Keys explizit buendeln (auch fuer Postgame).
+        - sonst mit gesetztem `dev_api_key` -> primary = **nur** der Dev-Key
+          (strikt, KEIN Round-Robin ueber beide - das wuerde den Haupt-Key
+          mitbelasten); fallback = `api_key` (greift, wenn Riot den Dev-Key
+          ablehnt, z. B. nach dem 24h-Ablauf).
+        - sonst -> primary = `api_key` wie bisher, kein Fallback.
+        """
+        if self.round_robin:
+            return self.active_api_keys, ()
+        if self.dev_api_key:
+            fallback = (self.api_key,) if self.api_key else ()
+            return (self.dev_api_key,), fallback
+        return self.active_api_keys, ()
 
     @property
     def seed_steps(self) -> tuple[str, ...]:
@@ -206,6 +240,36 @@ class Config:
                     cfg.seed_ttl_hours = max(0, int(pipeline["seed_ttl_hours"]))
                 except (TypeError, ValueError):
                     pass  # unbrauchbarer Wert -> Default (24 h) behalten
+            # Eigene Identitaet fuer den Post-Game-Report (wer bin "ich" im
+            # Match). Top-Level `me:` (Riot-ID 'Name#Tag' oder PUUID). Optionaler
+            # Ausgabeordner unter postgame.out_dir (Default ROOT/postgame).
+            cfg.me = str(data.get("me", cfg.me) or "").strip()
+            postgame = data.get("postgame", {}) or {}
+            if postgame.get("out_dir"):
+                p = Path(str(postgame["out_dir"]))
+                cfg.postgame_out_dir = p if p.is_absolute() else ROOT / p
+            # Auto-Trigger nach Spielende (Phase 2). Default an, wirkt aber nur im
+            # Voll-Modus (Key + me) - fehlt eines, ist der Trigger ein No-Op.
+            cfg.postgame_auto_on_end = bool(postgame.get("auto_on_end",
+                                                         cfg.postgame_auto_on_end))
+            try:
+                cfg.postgame_poll_interval_seconds = max(5, int(postgame.get(
+                    "poll_interval_seconds", cfg.postgame_poll_interval_seconds)))
+            except (TypeError, ValueError):
+                pass  # unbrauchbarer Wert -> Default (20 s) behalten
+            # Stufe-2-Retry-Budget (Schaden-Anreicherung). Match-V5 indexiert oft
+            # erst Minuten nach Spielende - reichlich Versuche geben. Backoff min.
+            # 5 s, damit das Riot-Rate-Limit nicht ueberrannt wird.
+            try:
+                cfg.postgame_enrich_retries = max(1, int(postgame.get(
+                    "enrich_retries", cfg.postgame_enrich_retries)))
+            except (TypeError, ValueError):
+                pass  # unbrauchbarer Wert -> Default (20) behalten
+            try:
+                cfg.postgame_enrich_backoff_seconds = max(5, int(postgame.get(
+                    "enrich_backoff_seconds", cfg.postgame_enrich_backoff_seconds)))
+            except (TypeError, ValueError):
+                pass  # unbrauchbarer Wert -> Default (30 s) behalten
             focus = data.get("focus", {})
             cfg.focus_role = normalize_role(focus.get("role", cfg.focus_role))
             cfg.focus_champions = tuple(focus.get("champions", []))

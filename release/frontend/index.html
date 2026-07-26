@@ -89,6 +89,20 @@
            border-radius: 6px; padding: 2px 6px; margin-top: 6px; }
   .itemlist { font-size: .78rem; color: var(--muted); margin-top: 6px; }
   #nogame { margin-top: 40px; text-align: center; color: var(--muted); }
+  /* "Match-Report bereit"-Button (Endscreen): grosser, auffaelliger Link auf
+     den fertigen Post-Game-Report. Wird nur ausserhalb des laufenden Spiels
+     gezeigt (no_game/post_game) - im Spiel hat die Live-Ansicht Vorrang. */
+  #reportBanner { display: block; text-decoration: none; margin: 18px 0;
+    padding: 16px 22px; border-radius: 12px; text-align: center;
+    font-size: 1.15rem; font-weight: 700; color: #10141a; cursor: pointer;
+    background: linear-gradient(90deg, var(--accent), var(--balanced));
+    box-shadow: 0 0 16px rgba(79, 195, 247, .45);
+    transition: transform .1s ease, box-shadow .1s ease; }
+  #reportBanner:hover { transform: translateY(-1px);
+    box-shadow: 0 0 22px rgba(79, 195, 247, .65); }
+  #reportBanner .report-badge { display: inline-block; margin-left: 12px;
+    padding: 2px 12px; border-radius: 20px; vertical-align: middle;
+    font-size: .78rem; font-weight: 600; background: rgba(16, 20, 26, .28); }
 </style>
 </head>
 <body>
@@ -98,6 +112,8 @@
     <span class="muted" id="countdown"></span>
     <button id="refreshBtn" title="Jetzt aktualisieren" onclick="refresh()">&#10227;</button>
   </div>
+
+  <a id="reportBanner" href="#" target="_blank" rel="noopener" hidden></a>
 
   <div id="nogame" hidden>Kein aktives Spiel gefunden – warte auf Spielstart …</div>
 
@@ -178,6 +194,21 @@ function render(s) {
   if (game) meta += ` · ${Math.floor(s.game_time / 60)} min`;
   if (s.phase === "post_game") meta += " · Spiel beendet – letzter Stand";
   document.getElementById("meta").textContent = meta;
+
+  // "Match-Report bereit"-Button: nur ausserhalb des laufenden Spiels zeigen
+  // (Endscreen = no_game/post_game). Waehrend ein Spiel laeuft (in_game) hat die
+  // Live-Ansicht Vorrang -> Button ausgeblendet. Link oeffnet in neuem Tab; bei
+  // Stufe-2-Aufwertung eine Zusatz-Badge "inkl. Schaden-Analyse".
+  const rep = s.postgame_report, banner = document.getElementById("reportBanner");
+  if (rep && rep.url && s.phase !== "in_game") {
+    banner.href = rep.url;
+    banner.innerHTML = "📊 Match-Report bereit"
+      + (rep.enriched ? '<span class="report-badge">inkl. Schaden-Analyse</span>' : "");
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+
   if (!game) return;
 
   const p = s.player, r = s.recommendations;

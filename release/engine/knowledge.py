@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 
-from pipeline.config import ROOT
+from core.config import ROOT
 
 
 # Optional gepinnte Quelle (nur fuer Backtest/Tests): zeigt auf eine konkrete
@@ -91,8 +91,8 @@ def cc_prior_for_id(cid: str | None) -> float | None:
 @lru_cache(maxsize=1)
 def _resolver_ctx() -> tuple:
     """Version + Cache-Pfad fuer die Namensaufloesung, einmal pro Prozess."""
-    from pipeline import ddragon
-    from pipeline.config import Config
+    from core import ddragon
+    from core.config import Config
     return ddragon.latest_version(), Config.load().cache_dir
 
 
@@ -102,7 +102,7 @@ def _simplified_keys() -> dict[str, str]:
     ('FiddleSticks'). Faengt die Riot-Inkonsistenz ab, dass der Match-V5-
     championName (KB-Key) in der Gross-/Kleinschreibung von der Data-Dragon-ID
     abweichen kann (bekannt: 'FiddleSticks' vs. 'Fiddlesticks')."""
-    from pipeline.ddragon import _simplify
+    from core.ddragon import _simplify
     return {_simplify(k): k for k in load()["champions"]}
 
 
@@ -115,12 +115,12 @@ def _canonical(champion: str) -> str:
     champions = load()["champions"]
     if champion in champions:
         return champion
-    from pipeline.ddragon import _simplify
+    from core.ddragon import _simplify
     simp = _simplified_keys()
     hit = simp.get(_simplify(champion))
     if hit:
         return hit
-    from pipeline import ddragon
+    from core import ddragon
     resolved = ddragon.resolve_name(*_resolver_ctx(), champion)
     if resolved:
         return simp.get(_simplify(resolved), resolved)

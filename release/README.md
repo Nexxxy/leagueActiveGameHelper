@@ -15,3 +15,17 @@ Dann im Browser: http://127.0.0.1:8000
 
 Beim ersten Start legt uv automatisch das venv an und die App laedt die
 statischen Spieldaten (Data Dragon) nach - einmalig Internet noetig.
+
+## Post-Game-Report
+Nach jedem beendeten Summoner's-Rift-Spiel erzeugt der Helper automatisch einen
+HTML-Report unter `postgame/live_<zeitstempel>.html` - komplett ohne API-Key.
+Er zeigt Gold-/CS-/Vision-/KDA-Verlaeufe, Scoreboard, Objectives, Todes-/
+Teamfight-Timing, Build- und Comp-Diagnose.
+
+Wichtig: Der Server muss VOR Spielbeginn laufen. Wird er erst spaeter (ab ~Minute
+2) gestartet, fehlt die volle Statistik.
+
+Optional: Traegst du in `config.yml` einen eigenen Riot-API-Key (`riot.api_key`)
+plus deine Riot-ID (`me: Name#Tag`) ein, wird der Report nach dem Spiel
+automatisch um Schaden-Diagramme und einen Impact-Score aufgewertet. Ohne Key
+ist er voll nutzbar; ein Disclaimer erklaert dann die fehlenden Schaden-Teile.

@@ -5,13 +5,13 @@ Ahri macht magischen Schaden, egal was sie baut; ein Full-Tank-Malphite hat
 kaum Offensiv-Gold, sein Schaden bleibt magisch. Data Dragon liefert pro
 Champion `info.attack` / `info.magic` (0-10) - daraus leiten wir einen
 A-priori-Split ab, der ab Minute 0 verfuegbar ist. Live-Items verfeinern
-diesen Prior spaeter nur noch (siehe app/profiling.py).
+diesen Prior spaeter nur noch (siehe engine/profiling.py).
 """
 
 from functools import lru_cache
 from pathlib import Path
 
-from pipeline import ddragon
+from core import ddragon
 
 
 # Kuratierte Korrekturen (Data-Dragon-ID -> ad_share), wo die info-Werte das
@@ -65,7 +65,7 @@ def damage_bucket(ad_shares) -> str | None:
     <= 0.4 -> ap (ap_share >= 0.6), sonst mixed. Leere Liste -> None.
 
     Gemeinsame Definition fuer Aggregation (pipeline.aggregate) und Live-Abfrage
-    (app.recommend by_threat-Lookup), damit Train und Serve dieselben gelernten
+    (engine.recommend by_threat-Lookup), damit Train und Serve dieselben gelernten
     Zellen unter derselben Bucket-Definition zaehlen bzw. abfragen (Review G).
     Gegner ohne bekannten Prior werden vom Aufrufer weggelassen."""
     shares = list(ad_shares)
@@ -133,7 +133,7 @@ def bucket_for(champion_display_name: str) -> str | None:
 def _resolver_ctx() -> tuple:
     """Version + Cache-Pfad fuer die Namensaufloesung, einmal pro Prozess.
     Gleiches Muster wie app/knowledge._resolver_ctx."""
-    from pipeline.config import Config
+    from core.config import Config
     return ddragon.latest_version(), Config.load().cache_dir
 
 
@@ -164,7 +164,7 @@ def cc_per_min_for_id(cid: str | None) -> float | None:
     wenn der Champion keinen Prior hat. Symmetrisch zu ad_share_for_id, aber die
     Quelle ist die aggregierte Wissensbasis (cc_priors in builds.yaml), nicht die
     Data-Dragon-Statik - CC laesst sich nur empirisch messen. Lazy-Import von
-    app.knowledge, um Modul-Importzyklen zu vermeiden."""
+    engine.knowledge, um Modul-Importzyklen zu vermeiden."""
     from . import knowledge
     return knowledge.cc_prior_for_id(cid)
 

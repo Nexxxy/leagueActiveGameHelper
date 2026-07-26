@@ -3,3 +3,6 @@ release/server.pid
 release/server.port
 release/smoketest.log
 release/currentGameInfo.yaml
+release/postgame/
+release/liveGameData/
+.smoke_tmp/

@@ -17,12 +17,17 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from pipeline.config import ROOT, VALID_ROLES, Config
-from . import (assets, demo, items, knowledge, live_client, profiling,
-               rec_partner, recommend)
+from core.config import ROOT, VALID_ROLES, Config
+from engine import items, knowledge, profiling, rec_partner, recommend
+from . import assets, demo, live_client
 
 app = FastAPI(title="League Active Game Helper")
 CFG = Config.load()
+
+# Laufender Post-Game-Watcher (nur im Voll-Modus gesetzt, s.
+# _start_postgame_watch). /api/state liest daraus den letzten fertigen Report;
+# ohne Watcher (Demo/Trigger aus) bleibt das Feld null.
+_WATCHER = None
 
 STATE = {
     "demo": False,
@@ -46,7 +51,7 @@ DUMP_ROOT = ROOT / "liveGameData"
 
 
 # Genau eine Quelle fuer die Rollen-Reihenfolge (dupliziert nicht mehr
-# pipeline.config.VALID_ROLES). Lokaler Name ROLE_ORDER bleibt fuer die
+# core.config.VALID_ROLES). Lokaler Name ROLE_ORDER bleibt fuer die
 # Konsumenten unveraendert.
 ROLE_ORDER = VALID_ROLES
 
@@ -391,7 +396,19 @@ def get_state():
         STATE["cache"] = (time.monotonic(), cached)
     # refresh_seconds steuert das Auto-Reload-Intervall des Frontends (config.yml)
     return {**cached, "refresh_seconds": CFG.refresh_seconds,
-            "assets_available": assets.assets_available()}
+            "assets_available": assets.assets_available(),
+            "postgame_report": _postgame_report()}
+
+
+def _postgame_report():
+    """Letzter fertiger Post-Game-Report fuer den Frontend-Button, oder None.
+
+    Bewusst NICHT gecacht (steht ausserhalb des STATE["cache"]-Snapshots), damit
+    ein waehrend der 2 s Cache-Fenster fertig gewordener Report sofort sichtbar
+    wird. Ohne Watcher (Demo/Trigger aus) oder wenn die Datei fehlt -> None."""
+    if _WATCHER is None:
+        return None
+    return _WATCHER.last_report()
 
 
 class PriorityUpdate(BaseModel):
@@ -417,6 +434,14 @@ def set_role(update: RoleUpdate):
     return {"ok": True}
 
 
+# Post-Game-Reports als statische Dateien ausliefern (der Frontend-Button
+# verlinkt auf /reports/<datei>). Ordner bei Start anlegen, sonst wirft
+# StaticFiles beim Mount. WICHTIG: dieser Mount MUSS vor dem Catch-all "/"
+# stehen, sonst schluckt das Frontend-Mount die /reports-Pfade. Fehlende
+# Einzeldateien liefern einen harmlosen 404 (kein 500).
+CFG.postgame_out_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/reports", StaticFiles(directory=CFG.postgame_out_dir), name="reports")
+
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")
 
 
@@ -436,6 +461,40 @@ def _dump_poll_loop() -> None:
     while True:
         _dump_poll_once()
         time.sleep(CFG.dump_interval_seconds)
+
+
+def _postgame_poll_loop(watcher) -> None:
+    """Endlosschleife: pollt die Live Client Data API in fester Kadenz und reicht
+    die Rohdaten (`allgamedata` oder None) an den Watcher weiter. Aktive Polls
+    fuellen das In-Memory-Capture; die Transition 'aktiv -> kein Spiel' triggert
+    den zweistufigen Auto-Report des gerade beendeten Spiels. Darf den Server nie
+    crashen -> jeder Durchlauf in try/except."""
+    while True:
+        try:
+            watcher.observe(live_client.fetch_allgamedata())
+        except Exception as exc:  # Auto-Trigger darf den Server nie crashen
+            print(f"Warnung: Post-Game-Auto-Trigger-Fehler ({exc})")
+        time.sleep(CFG.postgame_poll_interval_seconds)
+
+
+def _start_postgame_watch(demo: bool) -> None:
+    """Startet den Post-Game-Auto-Trigger (Phase 3 Teil C) als Daemon-Thread,
+    sofern das Flag `postgame.auto_on_end` gesetzt ist und kein Demo-Modus laeuft.
+    Key/`me:` sind KEINE Voraussetzung mehr - ohne Key entsteht der key-freie
+    Stufe-1-Report trotzdem. Ist das Flag aus (oder Demo), bleibt es ein stiller
+    No-Op mit genau EINER erklaerenden Log-Zeile."""
+    global _WATCHER
+    from .postgame_watch import PostgameWatcher
+    watcher = PostgameWatcher(CFG, log=print, demo=demo)
+    if not watcher.enabled:
+        print(f"Post-Game-Auto-Report deaktiviert ({watcher.disabled_reason}).")
+        return
+    # Watcher fuer /api/state sichtbar machen (Report-Button-Zustand).
+    _WATCHER = watcher
+    print(f"Post-Game-Auto-Report aktiv (Spielende-Erkennung alle "
+          f"{CFG.postgame_poll_interval_seconds}s) ...")
+    threading.Thread(target=_postgame_poll_loop, args=(watcher,),
+                     daemon=True).start()
 
 
 def _start_asset_download() -> None:
@@ -470,6 +529,7 @@ def main() -> None:
         print(f"Live-Data-Dump aktiv -> {DUMP_ROOT}")
         print(f"Dump-Poller aktiv, alle {CFG.dump_interval_seconds}s")
         threading.Thread(target=_dump_poll_loop, daemon=True).start()
+    _start_postgame_watch(args.demo)
     print(f"http://127.0.0.1:{args.port}  (Demo-Modus: {'an' if args.demo else 'aus'})")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 

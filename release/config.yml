@@ -4,3 +4,17 @@
 app:
   refresh_seconds: 15   # Auto-Refresh-Intervall des Frontends (Sekunden)
   auto_asset_download: true
+
+# Post-Game-Report: erzeugt nach jedem beendeten SR-Spiel automatisch einen
+# key-freien HTML-Report unter postgame/live_<zeitstempel>.html (Server muss
+# vor Spielbeginn laufen; ab ~Minute 2 fehlt sonst die volle Statistik).
+postgame:
+  auto_on_end: true          # Auto-Report bei Spielende
+  poll_interval_seconds: 20  # Kadenz der Spielende-Erkennung (Sekunden)
+
+# Optional: eigener Riot-API-Key -> der Report wird nach dem Spiel automatisch
+# um Schaden-Diagramme/Impact-Score angereichert; ohne Key voll funktionsfaehig
+# (ein Disclaimer im Report erklaert die dann fehlenden Teile).
+#riot:
+#  api_key: ...        # hier den eigenen Riot-API-Key eintragen
+#me: Name#Tag          # eigene Riot-ID (fuer die Schaden-Zuordnung)

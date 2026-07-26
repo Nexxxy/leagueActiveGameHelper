@@ -8,7 +8,7 @@ Stance-Logik:
 
 from dataclasses import dataclass, field, replace
 
-from pipeline import stats
+from core import stats
 from . import champions, items, knowledge, profiling
 # Fassade (Struktur-Review 2026-07-17 T2): die Themen-Helfer liegen jetzt in
 # eigenen Modulen, werden hier aber unter ihren alten Namen re-exportiert. Tests
@@ -147,7 +147,7 @@ def confidence_tier(kb: dict) -> str:
 
 def _shrunk(win_rate: float, n: int, base: float, k: float = SHRINK_K) -> float:
     """Geschrumpfte Win-Rate Richtung Basisrate. Duenner Wrapper um
-    pipeline.stats.shrunk (Befund D3) mit SHRINK_K als Item-Prior-Default."""
+    core.stats.shrunk (Befund D3) mit SHRINK_K als Item-Prior-Default."""
     return stats.shrunk(win_rate, n, base, k)
 
 

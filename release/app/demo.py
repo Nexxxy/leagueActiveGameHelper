@@ -4,7 +4,7 @@ damit die IDs immer gueltig sind. Enthaelt bewusst einen Tank-Sion und einen
 Crit-Sion-aehnlichen Fall (Jinx) zum Testen der Build-Erkennung.
 """
 
-from . import items
+from engine import items
 
 
 def _pick(want: set[str], avoid: set[str] = frozenset(), count: int = 3) -> list[int]:
