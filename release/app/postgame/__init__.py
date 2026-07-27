@@ -543,7 +543,14 @@ def _attach_phase4b(*, team_players: list, ser: dict, cmap: dict,
     # dezent markiert, wenn ihn auch das Verdikt nennt - und nur, wenn das Spiel
     # dort laut Team-Serien (`tvt`) wirklich gekippt ist (Korrektur 2026-07-25:
     # ein Stomp hat keinen Kipp-Punkt).
+    # Ursachen-Flags der VERLORENEN Fights (Unterzahl-Start, Gold-Rueckstand,
+    # gegnerischer Baron-/Elder-Buff, verlorene Eroeffnung) - key-frei aus
+    # Kill-Strom, Elite-Events und Team-Serien, also in BEIDEN Datenpfaden
+    # verfuegbar. Sie wandern ueber `teamfight_cards` an die Karten und tragen
+    # die Warum-Zeile des Verdikts (s. analysis.teamfight_reasons).
     clusters = analysis.detect_teamfights(kills, pid_team, my_team)
+    analysis.teamfight_reasons(clusters, kills, pid_team, my_team,
+                               elites=elites, team_series=tvt)
     tip_min = analysis.teamfight_tipping_minute(clusters, tvt)
     extra["teamfights"] = analysis.teamfight_cards(
         clusters, ranked_names, my_team, tip_minute=tip_min)
@@ -647,7 +654,9 @@ def _resolve_dump_patch(cfg: Config) -> str:
         if patches:
             return patches[0]
     from core import ddragon
-    return ddragon.patch_of(ddragon.latest_version())
+    # `latest_version_cached`: der Dump-Pfad ist key-frei und soll auch ohne Netz
+    # bis zum Report durchlaufen (Fallback = neueste vollstaendige Cache-Statik).
+    return ddragon.patch_of(ddragon.latest_version_cached(cfg.cache_dir))
 
 
 def _resolve_me_pid_dump(pid_map: dict, ident: str | None) -> int | None:

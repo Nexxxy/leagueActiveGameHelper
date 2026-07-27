@@ -15,6 +15,56 @@ def latest_version() -> str:
     return resp.json()[0]
 
 
+def _version_key(version: str) -> list[int]:
+    """Numerischer Sortierschluessel. Lexikografisch waere '16.9.1' > '16.14.1' -
+    genau der Fehler, der beim Patchwechsel die falsche Static-Version zieht."""
+    return [int(x) for x in version.split(".") if x.isdigit()]
+
+
+def cached_versions(cache_dir: Path) -> list[str]:
+    """Alle VOLLSTAENDIG gecachten Static-Versionen (item_<ver>.json UND
+    champion_<ver>.json liegen vor), numerisch aufsteigend sortiert.
+
+    Bewusst nur Paare: die beiden Dateien koennen auseinanderlaufen (ein
+    abgebrochener Lauf laedt item_ und champion_ nicht zwingend zusammen); eine
+    halbe Version taugt nicht als Fallback-Basis.
+    """
+    static = Path(cache_dir) / "static"
+    if not static.is_dir():
+        return []
+    found = []
+    for path in static.glob("item_*.json"):
+        version = path.name[len("item_"):-len(".json")]
+        if _version_key(version) and (static / f"champion_{version}.json").exists():
+            found.append(version)
+    return sorted(found, key=_version_key)
+
+
+def latest_version_cached(cache_dir: Path) -> str:
+    """Wie `latest_version()`, faellt aber ohne Netz auf die neueste vollstaendig
+    gecachte Static-Version zurueck.
+
+    Online ist das Verhalten UNVERAENDERT: die Riot-Antwort gewinnt immer, eine
+    neue Version laedt `_fetch_cached` automatisch nach (Auto-Refresh des
+    keyless-Teils). Der Fallback greift nur, wenn die versions.json nicht
+    erreichbar ist - dann startet die App mit den Referenzdaten, die sie hat,
+    statt gar nicht.
+    """
+    try:
+        return latest_version()
+    except (requests.RequestException, OSError):
+        pass
+    cached = cached_versions(cache_dir)
+    if cached:
+        return cached[-1]
+    raise RuntimeError(
+        f"Data-Dragon-Version nicht ermittelbar: kein Netz und kein "
+        f"vollstaendiger Static-Cache in {Path(cache_dir) / 'static'} "
+        f"(item_<ver>.json UND champion_<ver>.json derselben Version noetig). "
+        f"Einmal MIT Internetverbindung 'python -m pipeline update' oder "
+        f"'python -m pipeline focus' laufen lassen.")
+
+
 def patch_of(version: str) -> str:
     """'26.13.1' -> '26.13' (entspricht dem Prefix von gameVersion in Match-V5)."""
     return ".".join(version.split(".")[:2])

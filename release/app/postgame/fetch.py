@@ -365,7 +365,7 @@ def _item_static(cfg: Config, patch: str) -> dict:
     cached = sorted(static.glob(f"item_{patch}*.json")) if static.exists() else []
     if cached:
         return read_json(cached[-1])
-    version = _version_for_patch(patch)
+    version = _version_for_patch(patch, cfg.cache_dir)
     return ddragon.items(version, cfg.cache_dir)
 
 
@@ -438,9 +438,13 @@ def antiheal_item_ids(cfg: Config, patch: str) -> frozenset:
     return frozenset(ids) if ids else ANTIHEAL_FALLBACK_IDS
 
 
-def _version_for_patch(patch: str) -> str:
+def _version_for_patch(patch: str, cache_dir) -> str:
     """Volle Data-Dragon-Version zu einem Patch ('16.14' -> '16.14.1').
-    Sucht in der Versionsliste die erste passende, sonst latest."""
+    Sucht in der Versionsliste die erste passende, sonst latest.
+
+    Der Fallback nutzt `latest_version_cached`: ohne Netz greift er auf die
+    neueste vollstaendig gecachte Static-Version zurueck, damit der Report auch
+    offline baubar bleibt (key-freier Pfad)."""
     try:
         import requests
         resp = requests.get(f"{ddragon.BASE}/api/versions.json", timeout=15)
@@ -450,4 +454,4 @@ def _version_for_patch(patch: str) -> str:
                 return v
     except Exception:   # noqa: BLE001 - offline/kaputt -> latest
         pass
-    return ddragon.latest_version()
+    return ddragon.latest_version_cached(cache_dir)

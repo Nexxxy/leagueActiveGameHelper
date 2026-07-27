@@ -22,6 +22,8 @@ Reine Funktionen ohne Netz; IO nur das Einlesen der Snapshot-Dateien.
 import json
 from pathlib import Path
 
+from . import analysis
+
 # Live-Team ("ORDER"/"CHAOS") -> Riot-teamId (100/200), wie im Match-V5-Modell.
 _TEAM_ID = {"ORDER": 100, "CHAOS": 200}
 
@@ -31,6 +33,15 @@ _ROLE_ORDER = {"TOP": 0, "JUNGLE": 1, "MIDDLE": 2, "BOTTOM": 3, "UTILITY": 4}
 
 # Nur Summoner's Rift (CLASSIC) wird ausgewertet (s. plan_postgame.md §7).
 _SR_MODES = frozenset({"CLASSIC"})
+
+# Live-`DragonType` des Elder-Drachen. Die Live-Client-API schreibt den Element-
+# Typ als Klartext ("Fire"/"Earth"/"Water"/"Air"/"Hextech"/"Chemtech"/"Elder");
+# der Vergleich laeuft case-insensitiv, weil die Schreibweise nicht garantiert
+# ist. Er wird auf `analysis.ELDER_SUBTYPE` ("ELDER_DRAGON") abgebildet - genau
+# die Repraesentation, die der Timeline-Pfad aus dem ELITE_MONSTER_KILL-Event
+# liefert und die `analysis._elite_key`/`unconverted_buffs` erwarten. Ohne diese
+# Abbildung sah die Convert-Buff-Analyse im Dump-/Capture-Pfad nie einen Elder.
+_LIVE_ELDER = "elder"
 
 
 def _empty_series() -> dict:
@@ -279,7 +290,12 @@ def build_events_from_list(events_raw: list, pid_map: dict) -> dict:
         elif et in ("DragonKill", "BaronKill", "HordeKill"):
             killer = pid_of(ev.get("KillerName"))
             if et == "DragonKill":
-                monster, subtype = "DRAGON", ev.get("DragonType") or ""
+                dragon = str(ev.get("DragonType") or "")
+                # Elder auf die Timeline-Repraesentation heben, normale Drachen
+                # bleiben unveraendert (ihr Element ist nur Anzeige-Info).
+                subtype = (analysis.ELDER_SUBTYPE
+                           if dragon.strip().lower() == _LIVE_ELDER else dragon)
+                monster = "DRAGON"
             elif et == "BaronKill":
                 monster, subtype = "BARON_NASHOR", ""
             else:

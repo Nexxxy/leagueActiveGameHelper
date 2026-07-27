@@ -18,7 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.config import ROOT, VALID_ROLES, Config
-from engine import items, knowledge, profiling, rec_partner, recommend
+from engine import (items, knowledge, manifest, profiling, rec_partner,
+                    recommend)
 from . import assets, demo, live_client
 
 app = FastAPI(title="League Active Game Helper")
@@ -512,6 +513,25 @@ def _start_asset_download() -> None:
     threading.Thread(target=_load_assets, daemon=True).start()
 
 
+def _start_basisinfo_check() -> None:
+    """Prueft im Hintergrund, ob Statics/Wissensbasis hinter dem Live-Patch
+    zurueckliegen, und gibt dann GENAU EINE Hinweiszeile aus.
+
+    Bewusst in einem Daemon-Thread: `build_manifest` fragt die Data-Dragon-
+    Versionsliste ab; ohne Netz laeuft die in einen Timeout und duerfte den
+    Serverstart nicht aufhalten. Reiner Hinweis - es wird nichts automatisch
+    nachgeladen oder gecrawlt, und im Frontend erscheint nichts."""
+    def _check() -> None:
+        try:
+            hint = manifest.stale_hint(manifest.build_manifest(CFG))
+        except Exception as exc:  # noqa: BLE001 - Diagnose darf nie stoeren
+            print(f"Warnung: Basis-Info nicht pruefbar ({exc})")
+            return
+        if hint:
+            print(f"Hinweis: {hint}")
+    threading.Thread(target=_check, daemon=True).start()
+
+
 def main() -> None:
     import uvicorn
     parser = argparse.ArgumentParser()
@@ -530,6 +550,7 @@ def main() -> None:
         print(f"Dump-Poller aktiv, alle {CFG.dump_interval_seconds}s")
         threading.Thread(target=_dump_poll_loop, daemon=True).start()
     _start_postgame_watch(args.demo)
+    _start_basisinfo_check()
     print(f"http://127.0.0.1:{args.port}  (Demo-Modus: {'an' if args.demo else 'aus'})")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 

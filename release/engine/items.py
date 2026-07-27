@@ -73,7 +73,8 @@ CELESTIAL_OPPOSITION = "Celestial Opposition"
 @lru_cache(maxsize=1)
 def _load() -> tuple[str, dict]:
     cfg = Config.load()
-    version = ddragon.latest_version()
+    # Offline-tolerant: ohne Netz die neueste vollstaendig gecachte Version.
+    version = ddragon.latest_version_cached(cfg.cache_dir)
     data = ddragon.items(version, cfg.cache_dir)["data"]
     return version, data
 

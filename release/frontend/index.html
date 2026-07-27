@@ -92,6 +92,10 @@
   /* "Match-Report bereit"-Button (Endscreen): grosser, auffaelliger Link auf
      den fertigen Post-Game-Report. Wird nur ausserhalb des laufenden Spiels
      gezeigt (no_game/post_game) - im Spiel hat die Live-Ansicht Vorrang. */
+  /* WICHTIG: display:block wuerde das UA-[hidden]-display:none ueberschreiben,
+     dann waere der Banner IMMER sichtbar (leerer Klick-Balken vor dem ersten
+     Report). Daher [hidden] explizit auf display:none pinnen. */
+  #reportBanner[hidden] { display: none; }
   #reportBanner { display: block; text-decoration: none; margin: 18px 0;
     padding: 16px 22px; border-radius: 12px; text-align: center;
     font-size: 1.15rem; font-weight: 700; color: #10141a; cursor: pointer;

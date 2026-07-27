@@ -267,6 +267,17 @@ def item_sanity(item_ids: list, core_names: list, id_to_name) -> dict:
 # Zeilen waeren die spieler-bezogenen Befunde (Lane/Tode) komplett verdraengt
 # worden. 8 Zeilen bleiben ueberschaubar und lassen beide Ebenen zu.
 VERDICT_MAX_LINES = 8           # Cap: hoechstens so viele Befund-Zeilen
+
+# Slot-Reservierung (2026-07-27). Der Cap schnitt bisher stumpf hinten ab -
+# und seit dem Team-Diagnose-Ausbau gibt es so viele TEAM-Kandidaten (Kipp-
+# Punkt, Teamfight-Warum, Rollen-Differentiale, Objective-Bilanz, Unconverted,
+# Antiheal), dass sie die SPIELER-Befunde (Lane, Tode, Impact-Rueckstand, Build,
+# Vision) vollstaendig verdraengen konnten. Der Report soll aber primaer zeigen,
+# woran DER SPIELER arbeiten muss. Gibt es mindestens so viele Spieler-Befunde,
+# bekommt der Spieler-Block darum garantiert so viele der Slots; der Team-Block
+# wird dafuer hinten gekappt (Reihenfolge bleibt). Weniger Spieler-Befunde ->
+# der Team-Block fuellt wieder auf (kein Slot verfaellt).
+VERDICT_MIN_PLAYER_LINES = 2
 EARLY_DEATH_MIN = 3             # >= so viele Tode vor Min 10 -> eigener Befund
 DEATH_SKEW_MIN = 2              # ab so vielen Toden einer Art zaehlt der Skew
 DEATH_SKEW_SHARE = 0.5          # Anteil (Teamfight/Pick), ab dem wir ihn nennen
@@ -283,15 +294,47 @@ BUILD_LATE_GAP = 2.0            # Min hinter Gegenpart bei einem Kern-Item -> Be
 BUILD_HIT_LOW = 0.34           # Engine-Konformitaet <= 34 % -> Build-Ausreisser
 VISION_DEFICIT_MIN = 8         # Ward-Aktionen-Rueckstand (Summe), ab dem markant
 
-# Antiheal-Befund (Team-Diagnose 2026-07-26): ab welcher Gegner-Heilung der
-# Befund ueberhaupt eine Aussage ist. Bezug ist die SPIELDAUER, nicht ein
-# Absolutwert - ein 20-Minuten-Spiel heilt naturgemaess weniger als ein
-# 50-Minuten-Spiel. 1.900 Heilung je Minute (Team-Summe aus totalHeal +
-# totalHealsOnTeammates) entspricht dem oberen Viertel: aus 1.160 Team-
-# Stichproben des lokalen 16.14-Match-Caches liegt der Median bei ~1.500/min,
-# p75 bei ~1.920/min, p90 bei ~2.360/min. Darunter ist Heilung normales
-# Grundrauschen und kein Befund.
-ANTIHEAL_HEAL_PER_MIN = 1900
+# Antiheal-Befund (Team-Diagnose 2026-07-26, Gating verschaerft 2026-07-26b).
+#
+# Nutzer-Feedback: die Zeile war zu trigger-freudig - sie erschien auch dort, wo
+# Heilung nachweislich kein Problem war. Ein Befund ist sie nur, wenn ALLE DREI
+# Bedingungen gelten (s. `_verdict_antiheal_line`):
+#   (a) Heil-Signal   - Team-Heilung ueber ANTIHEAL_HEAL_PER_MIN_HARD ODER ein
+#                       EINZELNER Gegner ueber ANTIHEAL_SOLO_PER_MIN,
+#   (b) Versaeumnis   - kein eigenes Antiheal oder erst nach ANTIHEAL_LATE_MIN,
+#   (c) Wirkung       - die Teamfight-Bilanz ist negativ (mehr verlorene als
+#                       gewonnene Fights); sonst war die Heilung offenbar
+#                       beherrschbar und es gibt nichts zu lernen.
+#
+# Bezug ist immer die SPIELDAUER, nicht ein Absolutwert - ein 20-Minuten-Spiel
+# heilt naturgemaess weniger als ein 50-Minuten-Spiel.
+#
+# **Kalibrierung (2026-07-26, lokaler Match-Cache 16.13 + 16.14, 36.497 Matches
+# mit vollstaendiger Match-Summary = 72.994 Team- und 364.970 Spieler-Werte;
+# Heilung = totalHeal + totalHealsOnTeammates):**
+#   Team je Minute:    p50 1.442 | p75 1.861 | p90 2.337 | p95 2.700
+#   Spieler je Minute: p50   227 | p75   407 | p90   640 | p95   830
+# Daraus:
+ANTIHEAL_HEAL_PER_MIN_HARD = 2350   # ~p90 der Team-Verteilung (9,6 % der Teams).
+                                    # Bewusst ueber dem alten Wert 1.900 (~p77):
+                                    # jedes vierte Spiel ist kein "Befund".
+ANTIHEAL_SOLO_PER_MIN = 850         # ~p95 der Spieler-Verteilung (4,7 % der
+                                    # Spieler). Ein einzelner, unkuerzbar
+                                    # heilender Gegner ist auch dann ein Problem,
+                                    # wenn die TEAM-Summe unauffaellig bleibt.
+                                    # Belegt an beiden Referenz-Spielen:
+                                    # Nasus 27.556/30,7 min = 898/min
+                                    # (EUW1_7929799918, Team-Summe nur ~1.750/min)
+                                    # und XinZhao 57.187/57,7 min = 991/min
+                                    # (EUW1_7929841225, Team ~2.122/min - beide
+                                    # unter der Team-Schwelle). Tiefer als 850
+                                    # (p95) zu gehen wuerde jeden zweiten Tank/
+                                    # Lifesteal-Bruiser melden.
+ANTIHEAL_LATE_MIN = 25.0            # ein erstes Antiheal ab dieser Minute kam zu
+                                    # spaet, um die Mid-Game-Fights zu drehen
+                                    # (dokumentierte Wahl: die Mid-Phase der
+                                    # Delta-Engine endet bei Min 20, ein Kauf
+                                    # braucht danach noch Wirkzeit)
 
 # Rollen-Kurzlabel fuer die Team-Zeilen (Rollen-Differentiale).
 ROLE_LABEL = {"TOP": "Top", "JUNGLE": "Jungle", "MIDDLE": "Mid",
@@ -347,31 +390,61 @@ def _teamfight_balance(teamfights: list) -> tuple:
 
 
 def _defining_factor(teamfights: list, objectives: dict | None) -> str | None:
-    """Praegendster Faktor als kurze Nominalphrase (Teamfights vor Objectives)."""
-    won, lost, decisive = _teamfight_balance(teamfights or [])
-    if decisive >= TEAMFIGHT_MIN and won != lost:
-        return "Verlorene Teamfights" if lost > won else "Gewonnene Teamfights"
-    if objectives:
-        me_el = len((objectives.get("elites") or {}).get("me") or [])
-        opp_el = len((objectives.get("elites") or {}).get("opp") or [])
-        tw = objectives.get("towers") or {}
-        mt, ot = tw.get("me", 0), tw.get("opp", 0)
-        if abs(me_el - opp_el) >= OBJECTIVE_DIFF_MIN or abs(mt - ot) >= TOWER_DIFF_MIN:
-            lead = me_el >= opp_el and mt >= ot
-            return ("Eigene Objective-Kontrolle" if lead
-                    else "Objective-Kontrolle des Gegners")
+    """Praegendster Faktor als kurze Nominalphrase - oder None.
+
+    **Nutzer-Feedback 2026-07-26b (verbindliches Design-Prinzip): keine
+    tautologischen Aussagen.** "Niederlage. Praegendster Faktor: Verlorene
+    Teamfights." sagt nichts - dass ein verlorenes Spiel verlorene Fights hatte,
+    ist keine Erkenntnis; die interessante Frage ist, WARUM die Fights nicht
+    liefen (das beantwortet `_verdict_teamfight_reason_line`). Der Teamfight-
+    Zweig ist darum ersatzlos entfallen; es bleibt der nicht-tautologische
+    Objective-Befund bei markanter Differenz. Ohne Faktor traegt die Kopfzeile
+    nur noch das Ergebnis.
+
+    **Komponenten-Schaerfung 2026-07-27:** vorher genuegte EINE markante
+    Komponente, um pauschal "Objective-Kontrolle des Gegners" zu behaupten - bei
+    gemischter Bilanz (Referenz-Marathon: Elder 2:0 fuer uns, Tuerme 7:11 fuer
+    den Gegner) war das schlicht falsch. Jetzt entscheidet die Kombination:
+
+      * beide Komponenten markant und in DERSELBEN Richtung -> die pauschale
+        Aussage ist gedeckt,
+      * nur EINE markant (die andere unter ihrer Schwelle) -> die Zeile nennt
+        genau diese Komponente mit ihren Zahlen,
+      * beide markant, aber WIDERSPRUECHLICH -> gar kein Faktor. Eine gemischte
+        Bilanz ist nicht "praegend"; lieber keine Zeile als eine irrefuehrende."""
+    if not objectives:
+        return None
+    me_el = len((objectives.get("elites") or {}).get("me") or [])
+    opp_el = len((objectives.get("elites") or {}).get("opp") or [])
+    tw = objectives.get("towers") or {}
+    mt, ot = tw.get("me", 0), tw.get("opp", 0)
+    el_diff, tw_diff = me_el - opp_el, mt - ot
+    el_marked = abs(el_diff) >= OBJECTIVE_DIFF_MIN
+    tw_marked = abs(tw_diff) >= TOWER_DIFF_MIN
+    if el_marked and tw_marked:
+        if el_diff > 0 and tw_diff > 0:
+            return "Eigene Objective-Kontrolle"
+        if el_diff < 0 and tw_diff < 0:
+            return "Objective-Kontrolle des Gegners"
+        return None                      # gemischt -> kein praegender Faktor
+    if el_marked:
+        return (f"Eigene Elite-Objectives ({me_el}:{opp_el})" if el_diff > 0
+                else f"Elite-Objectives des Gegners ({me_el}:{opp_el})")
+    if tw_marked:
+        return (f"Eigener Turm-Vorteil ({mt}:{ot})" if tw_diff > 0
+                else f"Turm-Vorteil des Gegners ({mt}:{ot})")
     return None
 
 
 def _verdict_outcome_line(win, outcome_known: bool, teamfights: list,
                           objectives: dict | None) -> str | None:
-    """Zeile 1: Spiel-Ausgang + praegendster Faktor. Ohne bekanntes Endergebnis
-    (Live-/Dump-Pfad) nur der Faktor."""
+    """Zeile 1: Spiel-Ausgang + praegendster Faktor - Letzterer nur, wenn er
+    nicht-tautologisch ist (s. `_defining_factor`). Ohne bekanntes Endergebnis
+    (Live-/Dump-Pfad) bleibt nur der Faktor."""
     factor = _defining_factor(teamfights, objectives)
     if outcome_known:
         res = "Sieg" if win else "Niederlage"
-        return (f"{res}. Prägendster Faktor: {factor}." if factor
-                else f"Ergebnis: {res}.")
+        return f"{res}. Prägendster Faktor: {factor}." if factor else f"{res}."
     return f"Prägendster Faktor: {factor}." if factor else None
 
 
@@ -537,46 +610,94 @@ def _quote_part(row: dict) -> str:
     return f"{label} ({row['champ']} {pct} %{of})"
 
 
+def _join_de(parts: list) -> str:
+    """'A', 'A und B', 'A, B und C' - deutsche Aufzaehlung."""
+    if len(parts) <= 1:
+        return parts[0] if parts else ""
+    return ", ".join(parts[:-1]) + " und " + parts[-1]
+
+
 def _verdict_role_diff_line(rows: list) -> str | None:
-    """Rollen-Differentiale: groesstes Minus UND groesstes Plus im Team.
+    """Rollen-Differentiale: ALLE Rollen im Rueckstand + das groesste Plus.
 
     Team-Diagnose 2026-07-26 (Nutzer-Feedback: das Verdikt war zu stark auf den
     eigenen Spieler bezogen): stellt JEDE Rolle des eigenen Teams ihrem
-    Rollen-Gegenpart gegenueber (Impact-Quote, s. `role_quote_rows`) und nennt
-    die beiden Enden der Verteilung. Rein deskriptiv - Prozent des Gegenparts,
-    keine Wertung. Braucht mindestens zwei bewertbare Rollen (bei einer einzigen
-    waeren 'Minus' und 'Plus' derselbe Spieler)."""
+    Rollen-Gegenpart gegenueber (Impact-Quote, s. `role_quote_rows`). Rein
+    deskriptiv - Prozent des Gegenparts, keine Wertung.
+
+    **Erweiterung 2026-07-26b:** vorher nannte die Zeile nur Minimum und
+    Maximum. Das verschwieg, wenn MEHRERE Rollen hinten lagen - genau die
+    Information, aus der ein Team etwas lernt. Jetzt werden alle Rollen unter
+    QUOTE_LOW aufsteigend (schlechteste zuerst) als 'Minus' aufgezaehlt; das
+    'Plus' bleibt bewusst der EINE Spitzenwert ab QUOTE_HIGH (das Verdikt soll
+    Befunde nennen, keine Lobeslisten). Ohne Ausreisser nach unten oder oben
+    entfaellt die Zeile - lieber nichts als Rauschen. Braucht mindestens zwei
+    bewertbare Rollen (bei einer einzigen waere die Aussage ein Einzelvergleich,
+    den die Rueckstand-Zeile schon traegt)."""
     rated = [r for r in rows if r.get("quote") is not None and r.get("champ")]
     if len(rated) < 2:
         return None
-    low = min(rated, key=lambda r: r["quote"])
+    lows = sorted((r for r in rated if r["quote"] < QUOTE_LOW),
+                  key=lambda r: r["quote"])
     high = max(rated, key=lambda r: r["quote"])
-    if low["pid"] == high["pid"]:
+    if high["quote"] < QUOTE_HIGH:
+        high = None
+    if not lows and high is None:
         return None
-    return (f"Rollen-Differentiale: größtes Minus {_quote_part(low)}, "
-            f"größtes Plus {_quote_part(high)}.")
+    parts = []
+    if lows:
+        parts.append("Minus " + _join_de([_quote_part(r) for r in lows]))
+    if high is not None and all(high["pid"] != r["pid"] for r in lows):
+        parts.append(f"größtes Plus {_quote_part(high)}")
+    return "Rollen-Differentiale: " + ", ".join(parts) + "."
 
 
-def _verdict_antiheal_line(antiheal: dict | None) -> str | None:
+def _verdict_antiheal_line(antiheal: dict | None,
+                           teamfights: list | None = None) -> str | None:
     """Antiheal-Befund: markante Gegner-Heilung + eigene Grievous-Wounds-Kaeufe.
 
     `antiheal` (vom Report-Pfad gebaut, s. postgame._antiheal_summary):
     {opp_heal, opp_top:{champ,heal}, duration_min, buys:[{minute,champ,item}]}.
-    Die Zeile erscheint NUR, wenn die Gegner-Heilung je Spielminute
-    ANTIHEAL_HEAL_PER_MIN erreicht (sonst ist Heilung Grundrauschen). Sie nennt
-    die Summe, den staerksten Heiler und den ERSTEN eigenen Antiheal-Kauf -
-    neutral, ohne Bewertung."""
+
+    **Gating (Verschaerfung 2026-07-26b, Nutzer-Feedback "die Zeile ist zu
+    trigger-freudig"):** ein Befund ist das nur, wenn ALLE DREI Bedingungen
+    zutreffen (Schwellen + Kalibrierung s. Konstanten-Block oben):
+
+      (a) Heil-Signal: Team-Heilung >= ANTIHEAL_HEAL_PER_MIN_HARD (p90) ODER ein
+          EINZELNER Gegner >= ANTIHEAL_SOLO_PER_MIN (p95). Der Solo-Zweig faengt
+          den haeufigen Fall ab, dass EIN unkuerzbarer Champion das Spiel
+          traegt, waehrend die Team-Summe unauffaellig bleibt.
+      (b) Versaeumnis: das eigene Team hat gar kein Antiheal gekauft oder erst
+          nach ANTIHEAL_LATE_MIN. Wer frueh gekauft hat, hat die Lehre bereits
+          gezogen - dann ist die Zeile nur Rauschen.
+      (c) Wirkung: die Teamfight-Bilanz ist negativ (verlorene > gewonnene
+          Fights). War sie es nicht, war die Heilung offenbar beherrschbar.
+
+    Sie nennt die Summe, den staerksten Heiler und den ERSTEN eigenen
+    Antiheal-Kauf - neutral, ohne Bewertung."""
     if not antiheal:
         return None
     total = antiheal.get("opp_heal", 0) or 0
     dur = float(antiheal.get("duration_min", 0) or 0)
-    if total <= 0 or dur <= 0 or (total / dur) < ANTIHEAL_HEAL_PER_MIN:
+    if total <= 0 or dur <= 0:
         return None
     top = antiheal.get("opp_top") or {}
+    # (a) Heil-Signal - Team-Summe ODER ein einzelner Gegner.
+    solo = float(top.get("heal", 0) or 0) / dur
+    if ((total / dur) < ANTIHEAL_HEAL_PER_MIN_HARD
+            and solo < ANTIHEAL_SOLO_PER_MIN):
+        return None
+    # (b) Versaeumnis - kein eigenes Antiheal oder erst spaet.
+    buys = antiheal.get("buys") or []
+    if buys and float(buys[0].get("minute", 0) or 0) < ANTIHEAL_LATE_MIN:
+        return None
+    # (c) Wirkung - ohne negative Fight-Bilanz war die Heilung beherrschbar.
+    won, lost, decisive = _teamfight_balance(teamfights or [])
+    if decisive < TEAMFIGHT_MIN or lost <= won:
+        return None
     head = f"Gegner-Heilung {_fmt_int(total)}"
     if top.get("champ"):
         head += f" (Spitze {top['champ']} {_fmt_int(top.get('heal', 0))})"
-    buys = antiheal.get("buys") or []
     if not buys:
         return head + " — kein Antiheal im eigenen Team."
     first = buys[0]
@@ -620,11 +741,23 @@ def _verdict_oneside_line(teamfights: list,
                           team_series: dict | None = None) -> str | None:
     """Ersatz-Aussage fuer Spiele OHNE Kipp-Punkt: ab wann war es einseitig?
 
-    Greift nur, wenn kein einziger Fight die Kipp-Punkt-Regel erfuellt
-    (`_tipping_candidate` - bewusst ohne die Verdikt-Kopplung, sonst behauptete
-    die Zeile bei ausgeglichener Fight-Bilanz faelschlich 'kein Kipp-Punkt')
-    UND das Spiel dauerhaft einseitig war (`oneside_minute`)."""
-    if _tipping_candidate(teamfights or [], team_series) is not None:
+    Greift in zwei Faellen:
+
+    1. Kein einziger Fight erfuellt die Kipp-Punkt-Regel (`_tipping_candidate` -
+       bewusst ohne die Verdikt-Kopplung, sonst behauptete die Zeile bei
+       ausgeglichener Fight-Bilanz faelschlich 'kein Kipp-Punkt').
+    2. **Neu 2026-07-26b:** `tipping_decision` hat den Kandidaten selbst als
+       "durchgehend" entwertet (`kind="oneside"`), weil das am Ende unterlegene
+       Team vorher nie gefuehrt hat - dann waere "Kipp-Punkt bei Min X" falsch
+       erzaehlt (s. dort).
+
+    In beiden Faellen zusaetzlich noetig: das Spiel war dauerhaft einseitig
+    (`oneside_minute`)."""
+    dec = tipping_decision(teamfights or [], team_series)
+    if dec is not None:
+        if dec["kind"] != "oneside":
+            return None                      # tip/swing tragen die Aussage schon
+    elif _tipping_candidate(teamfights or [], team_series) is not None:
         return None
     one = oneside_minute(team_series)
     if not one:
@@ -754,8 +887,9 @@ def verdict(me_player: dict, team: list, *, win=None, outcome_known: bool = True
     (wichtigster zuerst), gerendert je auf eigener Zeile.
 
     Kandidaten (nur aufgenommen, was die Daten hergeben; Schwellen als Konstanten
-    oben): Spiel-Ausgang + praegendster Faktor, Teamfight-Bilanz (mit Kipp-Punkt
-    bzw. Fuehrungswechsel-Befund), Rollen-Differentiale, Objective-Bilanz,
+    oben): Spiel-Ausgang + praegendster Faktor (nur wenn nicht-tautologisch),
+    Teamfight-Bilanz (mit Kipp-Punkt bzw. Fuehrungswechsel-Befund), die
+    Warum-Zeile zu den verlorenen Fights, Rollen-Differentiale, Objective-Bilanz,
     folgenlose Baron-/Elder-Buffs, Antiheal-Befund, eigene Lane-Phase vs.
     Gegenpart, Todes-Muster + Killer-Verteilung, Impact-Quote-Rueckstand,
     Build-Befund, Vision-Befund. `has_damage=False` (key-frei) laesst die
@@ -791,18 +925,26 @@ def verdict(me_player: dict, team: list, *, win=None, outcome_known: bool = True
             if worst_pid != me_pid:
                 deficit = None
 
-    # Reihenfolge = Prioritaet (wichtigster Befund zuerst): Team-Befunde vor
-    # Spieler-Befunden. Der Cap schneidet die schwaecheren Kandidaten
-    # (Rueckstand/Build/Vision) zuerst ab.
-    candidates = [
+    # Reihenfolge = Prioritaet (wichtigster Befund zuerst): Kopf, dann
+    # Team-Befunde, dann Spieler-Befunde. Die Dreiteilung traegt die
+    # Slot-Reservierung (s. VERDICT_MIN_PLAYER_LINES) - ohne sie schnitt der Cap
+    # die Spieler-Befunde bei team-lastigen Spielen komplett weg.
+    head = [
         _verdict_outcome_line(win, outcome_known, teamfights, objectives),
+        # Fight-Bilanz + Kipp-Punkt: die eine Zeile, die das Spiel einordnet.
         _verdict_teamfight_line(teamfights, team_series),
+    ]
+    team_block = [
         # Ersatz fuer den Kipp-Punkt-Teil bei einseitigen Spielen (Stomp).
         _verdict_oneside_line(teamfights, team_series),
+        # WARUM liefen die Fights nicht? (ersetzt den tautologischen Faktor)
+        _verdict_teamfight_reason_line(teamfights),
         role_diff,
         _verdict_objective_line(objectives),
         _verdict_unconverted_line(objectives),
-        _verdict_antiheal_line(antiheal),
+        _verdict_antiheal_line(antiheal, teamfights),
+    ]
+    player_block = [
         _verdict_lane_line(me_player, has_damage),
         _verdict_death_line(me_player),
         deficit,
@@ -810,7 +952,17 @@ def verdict(me_player: dict, team: list, *, win=None, outcome_known: bool = True
         _verdict_build_line(me_player),
         _verdict_vision_line(me_player),
     ]
-    lines = [c for c in candidates if c][:VERDICT_MAX_LINES]
+    head = [c for c in head if c]
+    team_block = [c for c in team_block if c]
+    player_block = [c for c in player_block if c]
+
+    # Der Kopf hat Vorrang, danach wird der Team-Block auf das gekappt, was nach
+    # der Spieler-Reservierung uebrig bleibt; die Spieler-Zeilen fuellen den Rest
+    # (und mehr, wenn der Team-Block kuerzer ist als sein Budget).
+    budget = max(0, VERDICT_MAX_LINES - len(head))
+    reserved = min(len(player_block), VERDICT_MIN_PLAYER_LINES)
+    lines = head + team_block[:max(0, budget - reserved)]
+    lines += player_block[:max(0, VERDICT_MAX_LINES - len(lines))]
     if not lines:
         lines = ["Zu wenige Signale für ein belastbares Verdikt."]
     return {"lines": lines}
@@ -1104,9 +1256,14 @@ def detect_teamfights(kills: list, pid_team: dict, my_team: int, *,
         victims = sorted({k.get("victim") for k in cl
                           if k.get("victim") is not None})
         ts_start = min(_ts_ms(k) for k in cl)
+        # Opfer des ERSTEN Kills im Cluster - wer den Fight eroeffnet hat, indem
+        # er als Erster fiel (Basis des Faktors "Eroeffnung verloren",
+        # s. `teamfight_reasons`). `cl` ist bereits zeitlich sortiert.
+        first_victim = cl[0].get("victim")
         out.append({"minute": round(ts_start / 60000.0, 1),
                     "my_kills": my_k, "opp_kills": opp_k, "result": result,
                     "pids": sorted(pids), "victims": victims,
+                    "first_victim": first_victim,
                     "ts_start": ts_start,
                     "ts_end": max(_ts_ms(k) for k in cl)})
     return out
@@ -1469,6 +1626,26 @@ def _decisive_swing_minute(teamfights: list, after_index) -> float | None:
     return decisive[-1]
 
 
+def _underdog_ever_led(basis, minute: float) -> bool:
+    """Hat das am Ende UNTERLEGENE Team vor `minute` je selbst gefuehrt?
+
+    `basis` ist das Tupel aus `_tip_basis` (diff, thr, richtung, hold, metrik);
+    `richtung` s zeigt auf das am Ende fuehrende Team, das unterlegene ist also
+    -s. Gefuehrt heisst: die Differenz lag in Richtung -s mindestens einmal ueber
+    der Fuehrungs-Schwelle.
+
+    **Schwelle bewusst TIP_FLIP_GOLD (3.000) statt TIP_OPEN_GOLD (2.000), wenn
+    das Item-Gold die Basis ist:** dieselbe Begruendung wie bei
+    `_lead_flips_after` - unter 3.000 Gold schwankt die Differenz, ohne dass
+    jemand wirklich vorn liegt. Ein 2.000er Zwischenhoch fuer eine Minute ist
+    keine Fuehrung, die ein Spiel spaeter "kippen" koennte. Bei der
+    Kill-Differenz als Basis bleibt es bei deren eigener Schwelle."""
+    diff, thr, s, _hold, metric = basis
+    lead_thr = TIP_FLIP_GOLD if metric == "spent" else thr
+    end = max(0, min(int(minute), len(diff)))
+    return any(-s * d >= lead_thr for d in diff[:end])
+
+
 def tipping_decision(teamfights: list,
                      team_series: dict | None = None) -> dict | None:
     """Kipp-Punkt-Befund des Spiels: {kind, minute, flips} oder None.
@@ -1479,14 +1656,23 @@ def tipping_decision(teamfights: list,
       1. Die Fight-Bilanz muss ueberhaupt eine Aussage hergeben
          (>= TEAMFIGHT_MIN entschiedene Fights UND won != lost).
       2. Ein Fight muss die Kipp-Punkt-Regel erfuellen (`_tipping_candidate`).
-      3. **Gegenprobe (Haertung 2026-07-26):** wechselte die Fuehrung laut
+      3. **Gegenprobe A (Haertung 2026-07-26):** wechselte die Fuehrung laut
          Team-Item-Gold NACH dem Kandidaten noch mindestens TIP_FLIP_MIN Mal,
          ist "hier kippte das Spiel" nicht haltbar -> `kind="swing"` mit der
          Minute des letzten entscheidenden Fights statt eines Kipp-Punkts.
+      4. **Gegenprobe B (Nutzer-Befund 2026-07-26b an EUW1_7929799918):** ein
+         Spiel kann nur kippen, wenn es vorher in die andere Richtung stand.
+         Hat das am Ende unterlegene Team VOR dem Kandidaten nie selbst gefuehrt
+         (`_underdog_ever_led`), war es durchgehend einseitig - "Kipp-Punkt bei
+         Min X" waere falsch erzaehlt. Dann `kind="oneside"`, und die
+         Durchgehend-Formulierung aus `_verdict_oneside_line` uebernimmt.
+         Die Reihenfolge ist Absicht: bei mehreren Fuehrungswechseln (A) hat das
+         unterlegene Team per Definition zwischendurch gefuehrt - dort greift B
+         gar nicht.
 
     `kind="tip"` = belastbarer Kipp-Punkt, `kind="swing"` = mehrere
-    Fuehrungswechsel. None = kein Befund (u. a. Stomp - der hat keinen
-    Kipp-Punkt; dann greift `oneside_minute`)."""
+    Fuehrungswechsel, `kind="oneside"` = durchgehend einseitig (kein Kippen).
+    None = kein Befund (u. a. zu duenne Fight-Bilanz)."""
     won, lost, decisive = _teamfight_balance(teamfights or [])
     if decisive < TEAMFIGHT_MIN or won == lost:
         return None
@@ -1495,6 +1681,9 @@ def tipping_decision(teamfights: list,
         return None
     flips, last = _lead_flips_after(team_series, cand)
     if flips < TIP_FLIP_MIN:
+        basis = _tip_basis(team_series)
+        if basis is not None and not _underdog_ever_led(basis, cand):
+            return {"kind": "oneside", "minute": cand, "flips": flips}
         return {"kind": "tip", "minute": cand, "flips": flips}
     swing = _decisive_swing_minute(teamfights or [], last)
     if swing is None:
@@ -1528,6 +1717,189 @@ def oneside_minute(team_series: dict | None) -> dict | None:
         return None
     _diff, thr, s, hold, metric = basis
     return {"minute": float(hold), "ahead": s > 0, "thr": thr, "metric": metric}
+
+
+# --- Warum gingen die Fights verloren? (key-frei, 2026-07-26b) --------------
+#
+# Nutzer-Feedback (verbindliches Design-Prinzip): "Praegendster Faktor:
+# Verlorene Teamfights" ist wertlos - die Frage ist, WARUM die Fights nicht
+# liefen. Diese Sektion beantwortet sie mit vier Faktoren, die sich key-frei aus
+# Kill-Strom, Team-Serien und Elite-Monster-Events bestimmen lassen (also in
+# BEIDEN Datenpfaden: Timeline und Live-Dump/Capture):
+#
+#   undermanned  Der Fight begann in Unterzahl - ein eigener Tod fiel kurz vor
+#                dem ersten Kill des Clusters.
+#   behind       Der Fight wurde aus einem Gold-Rueckstand heraus angenommen.
+#   enemy_buff   Der Gegner hatte einen frischen Baron-/Elder-Buff.
+#   opened       Der erste Tod des Clusters fiel im eigenen Team.
+#
+# Bewusst KEINE Positionsdaten/Taktik-Behauptungen - alles Proxys aus Ereignis-
+# Zeitpunkten. Ein Faktor ist immer nur ein Umstand, nie ein Vorwurf; die
+# Formulierung im Verdikt bleibt entsprechend neutral.
+
+# Unterzahl-Fenster: ein eigener Tod in diesem Fenster VOR dem Fight-Start
+# heisst, der Gefallene stand beim Fight nicht mehr zur Verfuegung.
+#
+# **Staffelung 2026-07-27.** Vorher war das EIN fester Wert (30 s) - und damit
+# praktisch wirkungslos: `detect_teamfights` clustert mit `gap_s=20`, also
+# gehoert jeder Tod <= 20 s vor dem ersten Kill schon SELBST zum Cluster. Das
+# effektive Erkennungsfenster war das schmale Band (20 s, 30 s]. Die Untergrenze
+# bleibt implizit `gap_s`; wirksam wird die Regel erst mit einer Obergrenze
+# deutlich darueber.
+#
+# Die Staffelung ist an die real WACHSENDEN Respawn-Timer angelehnt (frueh ein
+# paar Sekunden, spaet weit ueber eine halbe Minute plus Rueckweg): (bis Minute
+# exklusiv, Fenster in s). Ehrlich als HEURISTIK zu lesen - die echten Timer
+# haengen an Champion-Level und Patch und sind key-frei nicht verfuegbar; hier
+# wird nur die Groessenordnung nachgebildet, nicht der Timer selbst.
+TF_UNDERMANNED_BY_MIN = ((15.0, 30.0), (25.0, 45.0), (float("inf"), 60.0))
+
+TF_UNDERMANNED_S = TF_UNDERMANNED_BY_MIN[0][1]   # Basiswert der Staffel (Early)
+
+
+def _undermanned_window_s(minute: float) -> float:
+    """Unterzahl-Fenster (s) fuer einen Fight zur Spielminute `minute`."""
+    for upto, window in TF_UNDERMANNED_BY_MIN:
+        if minute < upto:
+            return window
+    return TF_UNDERMANNED_BY_MIN[-1][1]
+
+
+
+TF_BEHIND_GOLD = TIP_OPEN_GOLD   # Gold-Rueckstand, ab dem ein Fight "aus dem
+                          # Rueckstand heraus" angenommen wurde. BEWUSST
+                          # dieselbe Schwelle wie beim Kipp-Punkt ("offen" bis
+                          # 2.000 Item-Gold Differenz) - eine zweite, eigene
+                          # Zahl fuer denselben Begriff waere Drift.
+TF_BUFF_S = 180.0         # Baron-Buff-Dauer (3 min). Faellt ein gegnerischer
+                          # Baron/Elder in diesem Fenster VOR dem Fight, war der
+                          # Buff beim Fight noch aktiv.
+
+TF_REASON_MIN = 2         # Ein Faktor wird nur genannt, wenn er bei mindestens
+                          # so vielen verlorenen Fights auftrat UND (s. u.) bei
+                          # mindestens der Haelfte. Einmal ist Zufall.
+TF_OPENER_MIN = 2         # ab so vielen Eroeffnungen wird der haeufigste eigene
+                          # Champion dazu benannt (darunter ist es kein Muster)
+
+# Reihenfolge = Nenn-Reihenfolge in der Verdikt-Zeile. Je Faktor zwei
+# Formulierungen: die erste (mit "X von N") traegt den Bezug, die folgenden
+# kuerzen auf "X×" ab, damit die Zeile lesbar bleibt.
+_TF_REASON_TEXT = [
+    ("undermanned", "{c} von {n} mit Unterzahl gestartet",
+                    "{c}× in Unterzahl gestartet"),
+    ("behind",      "{c} von {n} aus einem Gold-Rückstand angenommen",
+                    "{c}× aus einem Gold-Rückstand angenommen"),
+    ("enemy_buff",  "{c} von {n} gegen einen aktiven Baron-/Elder-Buff",
+                    "{c}× gegen einen aktiven Baron-/Elder-Buff"),
+    ("opened",      "{c} von {n} mit dem ersten Tod auf unserer Seite",
+                    "{c}× eröffnete der erste Tod bei uns"),
+]
+
+
+def teamfight_reasons(clusters: list, kills: list, pid_team: dict,
+                      my_team: int, *, elites: list | None = None,
+                      team_series: dict | None = None) -> list:
+    """Haengt jedem VERLORENEN Fight seine Ursachen-Flags an (`reasons`).
+
+    Arbeitet auf den Clustern aus `detect_teamfights` und ergaenzt sie in place
+    (Rueckgabe = dieselbe Liste, damit sich der Aufruf verketten laesst) - so
+    bleibt die Zuordnung Fight <-> Flags ohne fehleranfaellige Index-Kopplung.
+    Gewonnene/neutrale Fights bekommen bewusst KEINE Flags: die Frage lautet
+    "warum ging es schief?", nicht "wie stand es bei jedem Fight?".
+
+    `reasons` je verlorenem Fight:
+      {undermanned, behind, enemy_buff, opened: bool, opener_pid: int|None}
+    `opener_pid` ist nur gesetzt, wenn `opened` gilt (eigener Spieler fiel
+    zuerst) - der Aufrufer loest ihn ueber das Roster in einen Champion auf
+    (s. `teamfight_cards`)."""
+    other = 200 if my_team == 100 else 100
+    # Eigene Tode (Zeitpunkte) - Basis des Unterzahl-Faktors.
+    my_deaths = sorted(_ts_ms(k) for k in kills or []
+                       if pid_team.get(k.get("victim")) == my_team)
+    # Gegnerische Baron-/Elder-Kills - Basis des Buff-Faktors.
+    opp_buffs = sorted(_ts_ms(e) for e in elites or []
+                       if e.get("team") == other and _is_convert_buff(e))
+    gold = _team_diff((team_series or {}).get("spent"))
+
+    for c in clusters or []:
+        if c.get("result") != "verloren":
+            continue
+        start = c.get("ts_start")
+        if start is None:
+            start = float(c.get("minute", 0.0)) * 60000.0
+        # Fenster spielzeitabhaengig (s. TF_UNDERMANNED_BY_MIN) - die Minute
+        # kommt aus dem Cluster-Start, nicht aus dem gerundeten `minute`-Feld.
+        window = _undermanned_window_s(start / 60000.0)
+        undermanned = any(start - window * 1000 <= t < start
+                          for t in my_deaths)
+        enemy_buff = any(start - TF_BUFF_S * 1000 <= t < start
+                         for t in opp_buffs)
+        behind = False
+        if gold:
+            i = max(0, min(int(c.get("minute", 0.0)), len(gold) - 1))
+            behind = gold[i] <= -TF_BEHIND_GOLD
+        first_victim = c.get("first_victim")
+        opened = pid_team.get(first_victim) == my_team
+        c["reasons"] = {"undermanned": undermanned, "behind": behind,
+                        "enemy_buff": enemy_buff, "opened": opened,
+                        "opener_pid": first_victim if opened else None}
+    return clusters
+
+
+def teamfight_reason_summary(teamfights: list | None) -> dict | None:
+    """Aggregat der Fight-Ursachen ueber alle verlorenen Fights.
+
+    Zaehlt je Faktor, in wie vielen verlorenen Fights er auftrat, und ermittelt
+    den eigenen Champion, der am oeftesten als Erster fiel. Rueckgabe
+    {lost, counts:{...}, opener_top:(champ, anzahl)|None} oder None, wenn es gar
+    keine verlorenen Fights mit Ursachen-Daten gab. Arbeitet auf den
+    FIGHT-KARTEN (`teamfight_cards`), damit das Verdikt keine zweite Datenquelle
+    braucht."""
+    lost = [f for f in teamfights or []
+            if f.get("result") == "verloren" and f.get("reasons")]
+    if not lost:
+        return None
+    counts = {key: sum(1 for f in lost if f["reasons"].get(key))
+              for key, _first, _more in _TF_REASON_TEXT}
+    openers: dict = {}
+    for f in lost:
+        champ = f["reasons"].get("opener_champ")
+        if f["reasons"].get("opened") and champ:
+            openers[champ] = openers.get(champ, 0) + 1
+    top = max(openers.items(), key=lambda t: (t[1], t[0])) if openers else None
+    return {"lost": len(lost), "counts": counts, "opener_top": top}
+
+
+def _verdict_teamfight_reason_line(teamfights: list | None) -> str | None:
+    """Die "Warum"-Zeile zur Fight-Bilanz - oder None.
+
+    Genannt wird ein Faktor nur, wenn er in mindestens TF_REASON_MIN verlorenen
+    Fights UND in mindestens der HAELFTE davon auftrat. Beides zusammen: unter
+    zwei Vorkommen ist es Zufall, unter der Haelfte ist es kein Muster des
+    Spiels. Erreicht kein Faktor die Schwelle, entfaellt die Zeile ersatzlos -
+    lieber nichts als Rauschen (Design-Prinzip 2026-07-26b).
+
+    Der Ton ist bewusst deskriptiv ("mit Unterzahl gestartet", nicht "schlecht
+    positioniert") - das Verdikt beschreibt Umstaende, es verteilt keine
+    Schuld."""
+    summary = teamfight_reason_summary(teamfights)
+    if not summary:
+        return None
+    n, counts = summary["lost"], summary["counts"]
+    parts = []
+    for key, first, more in _TF_REASON_TEXT:
+        c = counts.get(key, 0)
+        if c < TF_REASON_MIN or c * 2 < n:
+            continue
+        text = (first if not parts else more).format(c=c, n=n)
+        if key == "opened":
+            top = summary.get("opener_top")
+            if top and top[1] >= TF_OPENER_MIN:
+                text += f" ({top[1]}× {top[0]})"
+        parts.append(text)
+    if not parts:
+        return None
+    return "Verlorene Fights: " + ", ".join(parts) + "."
 
 
 # --- Gewinnchance ueber Zeit (heuristisch, key-frei) ------------------------
@@ -1731,7 +2103,12 @@ def teamfight_cards(clusters: list, roster: dict, my_team: int,
     Roster zuordenbare oder team-fremde pids werden uebersprungen; ein Fight ohne
     beteiligte, zuordenbare Champs entfaellt (kein leeres Rendern). `tip_minute`
     markiert den Kipp-Punkt-Fight (`tip=True`). Rein/testbar - der Renderer
-    konsumiert nur; `minute`/`result` bleiben fuer das Verdikt erhalten."""
+    konsumiert nur; `minute`/`result` bleiben fuer das Verdikt erhalten.
+
+    Wurde der Cluster vorher mit `teamfight_reasons` annotiert, wandern dessen
+    Ursachen-Flags als `reasons` mit auf die Karte - `opener_pid` dabei ueber das
+    Roster zu `opener_champ` aufgeloest, damit weder Verdikt noch Renderer das
+    Roster nochmal brauchen."""
     other = 200 if my_team == 100 else 100
     cards = []
     for c in clusters:
@@ -1755,7 +2132,7 @@ def teamfight_cards(clusters: list, roster: dict, my_team: int,
             side.sort(key=lambda e: ROLE_ORDER.get(e["role"], 9))
         is_tip = (tip_minute is not None
                   and abs(c["minute"] - tip_minute) < 1e-6)
-        cards.append({
+        card = {
             "minute": c["minute"],
             "my_kills": c["my_kills"],
             "opp_kills": c["opp_kills"],
@@ -1763,7 +2140,16 @@ def teamfight_cards(clusters: list, roster: dict, my_team: int,
             "me": sides[my_team],
             "opp": sides[other],
             "tip": is_tip,
-        })
+        }
+        reasons = c.get("reasons")
+        if reasons:
+            opener = reasons.get("opener_pid")
+            card["reasons"] = {
+                **{k: v for k, v in reasons.items() if k != "opener_pid"},
+                "opener_champ": (roster.get(opener) or {}).get("champ")
+                                if opener is not None else None,
+            }
+        cards.append(card)
     return cards
 
 

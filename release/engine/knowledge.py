@@ -25,24 +25,39 @@ def set_source(path: Path | None) -> None:
     _simplified_keys.cache_clear()
 
 
-def _latest_builds() -> tuple[str, dict]:
+def source_path() -> Path | None:
+    """Pfad der builds.yaml, die `load()` tatsaechlich liest (die gepinnte Quelle
+    oder die neueste generierte), None wenn keine existiert.
+
+    Oeffentlich, damit die Diagnose (engine.manifest) den Pfad nicht nachbaut -
+    eine Quelle der Wahrheit statt zweier, die auseinanderlaufen koennen."""
     if _PINNED is not None:
-        # Patch-Name aus dem Elternverzeichnis der gepinnten Datei; leer -> "backtest".
-        patch = _PINNED.parent.name or "backtest"
-        return patch, yaml.safe_load(_PINNED.read_text(encoding="utf-8"))
+        return _PINNED
     generated = ROOT / "knowledge" / "generated"
     candidates = sorted(
         generated.glob("*/builds.yaml"),
         key=lambda p: [int(x) for x in p.parent.name.split(".") if x.isdigit()],
     )
-    if not candidates:
+    return candidates[-1] if candidates else None
+
+
+def overrides_path() -> Path:
+    """Pfad der kuratierten Overrides (existiert nicht zwingend)."""
+    return ROOT / "knowledge" / "curated" / "overrides.yaml"
+
+
+def _latest_builds() -> tuple[str, dict]:
+    path = source_path()
+    if path is None:
         return "", {"champions": {}}
-    path = candidates[-1]
-    return path.parent.name, yaml.safe_load(path.read_text(encoding="utf-8"))
+    # Patch-Name aus dem Elternverzeichnis; leer -> "backtest" (gepinnte Quelle
+    # ohne Patch-Ordner, nur Backtest/Tests).
+    patch = path.parent.name or "backtest"
+    return patch, yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def _overrides() -> dict:
-    path = ROOT / "knowledge" / "curated" / "overrides.yaml"
+    path = overrides_path()
     if not path.exists():
         return {}
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -93,7 +108,9 @@ def _resolver_ctx() -> tuple:
     """Version + Cache-Pfad fuer die Namensaufloesung, einmal pro Prozess."""
     from core import ddragon
     from core.config import Config
-    return ddragon.latest_version(), Config.load().cache_dir
+    cache_dir = Config.load().cache_dir
+    # Offline-tolerant: ohne Netz die neueste vollstaendig gecachte Version.
+    return ddragon.latest_version_cached(cache_dir), cache_dir
 
 
 @lru_cache(maxsize=1)

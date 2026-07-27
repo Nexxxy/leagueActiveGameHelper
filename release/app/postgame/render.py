@@ -856,12 +856,41 @@ def _tf_team(entries: list, side_cls: str) -> str:
     return f'<div class="tf-team {side_cls}">{body}</div>'
 
 
+# Ursachen-Flag -> Chip-Beschriftung (s. analysis.teamfight_reasons). Bewusst
+# knapp und deskriptiv - die ausformulierte Aussage steht im Verdikt.
+_TF_WHY_LABEL = [("undermanned", "Unterzahl"),
+                 ("behind", "Gold-Rückstand"),
+                 ("enemy_buff", "Gegner-Buff"),
+                 ("opened", "Erster Tod bei uns")]
+
+
+def _tf_why(reasons: dict | None) -> str:
+    """Ursachen-Chips einer verlorenen Fight-Karte - leer, wenn es keine gibt.
+
+    Nur verlorene Fights tragen `reasons` (s. analysis.teamfight_reasons); trifft
+    dort kein Faktor zu, bleibt die Zeile weg statt eine leere Leiste zu rendern.
+    Der Eroeffner-Champion haengt am 'Erster Tod bei uns'-Chip."""
+    if not reasons:
+        return ""
+    chips = []
+    for key, label in _TF_WHY_LABEL:
+        if not reasons.get(key):
+            continue
+        if key == "opened" and reasons.get("opener_champ"):
+            label += f" ({reasons['opener_champ']})"
+        chips.append(f'<span class="tf-why-chip">{_esc(label)}</span>')
+    if not chips:
+        return ""
+    return f'<div class="tf-why">{"".join(chips)}</div>'
+
+
 def _teamfight_section(report: dict) -> str:
     """Teamfight-Sektion als kompakte Karten (Redesign 2026-07-24, Nutzer-
     Feedback): Kopfzeile mit Minute-Chip + Ergebnis (aus eigener Sicht) +
     Ausgang-Badge, darunter zwei Team-Spalten (links eigenes Team, rechts
     Gegner) mit rollensortierten Champs; Gefallene durchgestrichen/ausgegraut.
-    Der Kipp-Punkt-Fight bekommt einen dezenten Akzent-Rand (`tf-tip`)."""
+    Der Kipp-Punkt-Fight bekommt einen dezenten Akzent-Rand (`tf-tip`);
+    verlorene Fights zeigen darunter ihre Ursachen-Chips (s. `_tf_why`)."""
     fights = report.get("teamfights") or []
     if not fights:
         return ""
@@ -883,7 +912,9 @@ def _teamfight_section(report: dict) -> str:
             f'{_tf_team(f.get("me") or [], "tf-team-me")}'
             '<span class="tf-vs">vs</span>'
             f'{_tf_team(f.get("opp") or [], "tf-team-opp")}'
-            '</div></div>')
+            '</div>'
+            f'{_tf_why(f.get("reasons"))}'
+            '</div>')
     return f'<div class="tf-cards">{"".join(cards)}</div>'
 
 
@@ -1355,6 +1386,10 @@ a{color:var(--accent);}
 .tf-won{color:var(--win);background:var(--win-soft);}
 .tf-lost{color:var(--loss);background:var(--loss-soft);}
 .tf-neutral{color:var(--muted);background:var(--card-2);}
+.tf-why{display:flex;flex-wrap:wrap;gap:3px 5px;margin-top:8px;
+  padding-top:7px;border-top:1px solid var(--line);}
+.tf-why-chip{font-family:var(--mono);font-size:8.5px;letter-spacing:.03em;
+  color:var(--muted);background:var(--card-2);border-radius:4px;padding:2px 5px;}
 .tf-teams{display:grid;grid-template-columns:1fr auto 1fr;align-items:start;gap:7px;}
 .tf-team{display:flex;flex-direction:column;gap:3px;min-width:0;}
 .tf-team-opp{align-items:flex-end;text-align:right;}

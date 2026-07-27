@@ -134,7 +134,9 @@ def _resolver_ctx() -> tuple:
     """Version + Cache-Pfad fuer die Namensaufloesung, einmal pro Prozess.
     Gleiches Muster wie app/knowledge._resolver_ctx."""
     from core.config import Config
-    return ddragon.latest_version(), Config.load().cache_dir
+    cache_dir = Config.load().cache_dir
+    # Offline-tolerant: ohne Netz die neueste vollstaendig gecachte Version.
+    return ddragon.latest_version_cached(cache_dir), cache_dir
 
 
 def prior_for_id(cid: str | None) -> dict:

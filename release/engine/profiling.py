@@ -20,8 +20,10 @@ def _canonical_ids() -> dict:
     from core import ddragon
     from core.config import Config
     from core.ddragon import _simplify
-    version = ddragon.latest_version()
-    data = ddragon.champions(version, Config.load().cache_dir)["data"]
+    cache_dir = Config.load().cache_dir
+    # Offline-tolerant: ohne Netz die neueste vollstaendig gecachte Version.
+    version = ddragon.latest_version_cached(cache_dir)
+    data = ddragon.champions(version, cache_dir)["data"]
     return {_simplify(info["id"]): info["id"] for info in data.values()}
 
 
