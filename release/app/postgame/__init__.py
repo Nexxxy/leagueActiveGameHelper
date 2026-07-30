@@ -16,8 +16,11 @@ from pathlib import Path
 import yaml
 
 from core.config import Config
-from . import (analysis, build_replay, capture, enrich, fetch, live_series,
-               render, series, trend)
+# `capture` wird hier nicht direkt benutzt, aber bewusst eager mitgeladen: der
+# Release-Smoketest importiert `app.postgame.capture` und wuerde ein fehlendes
+# Submodul im Paket sonst erst zur Laufzeit bemerken.
+from . import (analysis, build_replay, capture, enrich, fetch,  # noqa: F401
+               live_series, render, series, trend)
 
 # Anzeige-Namen der relevanten Queues (SR 5v5).
 _QUEUE_NAME = {420: "Ranked Solo/Duo", 440: "Ranked Flex",
@@ -119,8 +122,6 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
         opp_part = by_pid.get(opp) if opp else None
         deltas = analysis.phase_deltas(ser, pid, opp, role)
         ctx = analysis.kill_context(ser["events"]["kills"], pid,
-                                    {pp["participantId"] for pp in parts
-                                     if pp["teamId"] == my_team},
                                     team_kills[my_team])
         deaths = analysis.death_phases(ser["events"]["kills"], pid)
         champ = p.get("championName", "")
@@ -242,7 +243,7 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
     # Auto-Verdikt NACH _attach_phase4b: braucht Teamfights/Impact + die per
     # phase4b angereicherten Team-Karten (Todes-Art, Build-Eval) des me-Spielers.
     verdict = analysis.verdict(
-        me_player, team_players, win=me_player["win"], outcome_known=True,
+        me_player, win=me_player["win"], outcome_known=True,
         objectives=objectives, teamfights=extra.get("teamfights"),
         impact=extra.get("impact"), scoreboard=scoreboard, has_damage=True,
         team_series=tvt, antiheal=antiheal)
@@ -272,6 +273,9 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
         "team": team_players,
         "duo_series": duo,
         "team_series": tvt,
+        # Ab welcher Minute die Serien gemessen (statt aufgefuellt) sind - im
+        # Timeline-Pfad immer 0, weil die Timeline bei Spielbeginn anfaengt.
+        "data_start": ser.get("data_start", 0),
         "winprob": winprob,       # heuristische Gewinnchance je Minute (0..1)
         "ranking": ranking,
         "finals": sb_finals,
@@ -694,24 +698,55 @@ def _patch_vision_deltas(deltas: list, ser: dict, pid: int, opp) -> None:
                                        "delta": mine - other}
 
 
+def _online_report(cfg: Config, pid_map: dict, ident: str | None,
+                   log=print) -> dict | None:
+    """Vollen Match-V5-Report zum Mitschnitt bauen - oder None (key-frei bleiben).
+
+    Sobald Riot das Spiel indexiert hat, ist Match-V5 die verlaessliche Quelle
+    fuer ALLES (Gold/CS/Level/Items/Events/Schaden/Ausgang). Statt einzelne
+    Serien in den Live-Report zu mergen, wird darum der komplette Timeline-Report
+    gebaut und ersetzt den key-freien (Entscheidung 2026-07-30, WARUM s.
+    `enrich`-Modul-Docstring: die Live-Client-API lieferte fuer Viego zeitweise
+    leere Item-Listen und damit falsches Item-Gold).
+
+    `enriched_match_id` traegt die echte ID, damit der Trend-Record unter ihr
+    laeuft. `source_match_id` setzt der AUFRUFER, wenn eine bestehende Datei-URL
+    erhalten bleiben soll (Auto-Report Stufe 2) - der CLI-Dump-Pfad braucht das
+    nicht und schreibt direkt unter der echten Match-ID.
+
+    Jeder Fehler (kein Key/Roster-Treffer -> None aus `find_match_id`; Match
+    indexiert, Timeline noch 404 -> SystemExit aus `build_report`) endet in None;
+    der Aufrufer faellt dann auf den key-freien Report zurueck."""
+    try:
+        real_id = enrich.find_match_id(cfg, pid_map, ident, log=log)
+        if not real_id:
+            return None
+        report = build_report(cfg, real_id, me=ident, log=log)
+    except (Exception, SystemExit) as exc:   # noqa: BLE001 - nie crashen
+        log(f"[postgame] Voller Match-Report nicht baubar ({exc!r}) - "
+            f"Report bleibt key-frei.")
+        return None
+    report["enriched_match_id"] = real_id
+    log(f"[postgame] Report vollstaendig aus Match {real_id} gebaut.")
+    return report
+
+
 def build_report_from_dump(cfg: Config, dump_dir, *, me: str | None = None,
                            enrich_damage: bool = True,
                            status_override: str | None = None,
                            log=print) -> dict:
-    """Report-Modell (Dict) aus einem Live-Dump-Ordner - key-frei mit optionaler
-    Schaden-Anreicherung.
+    """Report-Modell (Dict) aus einem Live-Dump-Ordner: key-frei - oder, sobald
+    das echte Match online ist, der VOLLE Match-V5-Report.
 
-    Gleiche Modell-Form wie `build_report`, aber die Serien/Events stammen aus
-    dem Live-Client-Capture (`live_series`): Gold = Item-Gold (Σ price×count),
-    Vision = wardScore. Der **Schaden** fehlt key-frei; ist `enrich_damage` an
-    UND ein gueltiger API-Key da, werden Match+Timeline zum Dump nachgeladen und
-    die Schaden-Serien + Impact-Rohwerte gemergt (s. `enrich`). Klappt das:
-    `has_damage=True`, `source="live_dump+timeline"`, `impact_raw` gesetzt - der
-    Renderer zeigt dann die bestehenden Schaden-Charts. Jeder Fehlerpfad
-    (kein/ungueltiger Key, kein Roster-Treffer, Fetch scheitert) faellt sauber auf
-    key-frei zurueck (`has_damage=False`, Disclaimer). `enrich_damage=False`
-    erzwingt den key-freien Modus (Tests/Vergleich). Delta-Engine, Lobby-Ranking
-    und Item-Sanity werden unveraendert wiederverwendet."""
+    Ist `enrich_damage` an UND ein gueltiger API-Key da, wird zuerst versucht,
+    das zum Dump gehoerende Match zu finden (Roster-Abgleich, s. `enrich`) und
+    daraus den vollstaendigen Timeline-Report zu bauen (`source="timeline"`,
+    `has_damage=True`, echtes Endergebnis). Klappt das nicht (kein/ungueltiger
+    Key, kein Roster-Treffer, Timeline noch nicht indexiert), entsteht wie bisher
+    der key-freie Dump-Report: Serien/Events aus dem Live-Client-Capture
+    (`live_series`), Gold = Item-Gold (Σ price×count), Vision = wardScore, kein
+    Schaden (`has_damage=False`, Disclaimer). `enrich_damage=False` erzwingt den
+    key-freien Modus (Tests/Vergleich, `--no-enrich`)."""
     dump_dir = Path(dump_dir)
     snapshots = live_series.load_snapshots(dump_dir)
     mode = live_series.game_mode(snapshots)
@@ -721,15 +756,24 @@ def build_report_from_dump(cfg: Config, dump_dir, *, me: str | None = None,
             f"Summoner's Rift (CLASSIC).")
 
     pid_map = live_series.build_pid_map(snapshots)
+    # Identitaet: --me/config me: > activePlayer-Riot-ID des Dumps.
+    ident = (me or cfg.me or "").strip() or live_series.resolve_me_name(snapshots)
+
+    # Erst der volle Online-Report; nur wenn der nicht geht, der key-freie Bau.
+    # `source_match_id` bleibt ungesetzt: der CLI-Dump-Pfad hat keine bestehende
+    # Datei-URL zu bewahren, `_write_report` legt die HTML unter der echten
+    # Match-ID ab.
+    if enrich_damage:
+        full = _online_report(cfg, pid_map, ident, log=log)
+        if full is not None:
+            return full
+
     ser = live_series.build_series_from_dump(snapshots, pid_map)
     finals = live_series.final_stats(snapshots, pid_map)
     id_to_name = live_series.item_name_lookup_from_dump(snapshots)
     item_gold = live_series.item_gold_lookup_from_dump(snapshots)
     duration_min = round(((snapshots[-1].get("gameData", {}) or {})
                           .get("gameTime", 0.0)) / 60.0, 1)
-
-    # Identitaet: --me/config me: > activePlayer-Riot-ID des Dumps.
-    ident = (me or cfg.me or "").strip() or live_series.resolve_me_name(snapshots)
     return _build_report_core(
         cfg, pid_map=pid_map, ser=ser, finals=finals, id_to_name=id_to_name,
         item_gold=item_gold, ident=ident, duration_min=duration_min,
@@ -743,13 +787,21 @@ def build_report_from_capture(cfg: Config, result, *, me: str | None = None,
                               log=print) -> dict:
     """Report-Modell aus einem eingefrorenen In-Memory-Capture (`capture.py`).
 
-    Der zweistufige Server-Auto-Report (Phase 3 Teil C) nutzt das: Stufe 1 ruft
-    mit `enrich_damage=False` (key-frei, sofort), Stufe 2 mit `enrich_damage=True`
-    (Schaden aus Match+Timeline nachladen). Die Serien/Events/Endwerte kommen
-    fertig aus dem `CaptureResult`; sonst identische Logik wie
-    `build_report_from_dump`. Identitaet: --me/config `me:` > activePlayer aus dem
-    Capture (im Live-Betrieb IST der activePlayer der Nutzer)."""
+    Semantik wie `build_report_from_dump`: `enrich_damage=True` versucht zuerst
+    den vollen Match-V5-Report (`_online_report`), `False` erzwingt den key-freien
+    Capture-Report. Der zweistufige Server-Auto-Report (Phase 3 Teil C) ruft hier
+    IMMER mit `False` (Stufe 1 sofort key-frei, Zwischenstaende ebenso); den
+    vollen Report baut Stufe 2 selbst, weil sie die bestehende Datei-URL ueber
+    `source_match_id` erhalten muss (s. `app/postgame_watch.py`).
+
+    Die Serien/Events/Endwerte kommen fertig aus dem `CaptureResult`. Identitaet:
+    --me/config `me:` > activePlayer aus dem Capture (im Live-Betrieb IST der
+    activePlayer der Nutzer)."""
     ident = (me or cfg.me or "").strip() or result.me_ident
+    if enrich_damage:
+        full = _online_report(cfg, result.pid_map, ident, log=log)
+        if full is not None:
+            return full
     return _build_report_core(
         cfg, pid_map=result.pid_map, ser=result.ser, finals=dict(result.finals),
         id_to_name=result.id_to_name, item_gold=None, ident=ident,
@@ -764,12 +816,17 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
                        queue_label: str = "Summoner's Rift (Live-Capture)",
                        enrich_damage: bool = True,
                        status_override: str | None = None, log=print) -> dict:
-    """Gemeinsamer Report-Kern fuer Datei-Dump UND In-Memory-Capture.
+    """Gemeinsamer, KEY-FREIER Report-Kern fuer Datei-Dump UND In-Memory-Capture.
 
     Bekommt die bereits gebauten Primitive (pid_map, Serien, Endwerte,
     Item-Lookup, Identitaet) und erzeugt daraus das quellenunabhaengige
-    Report-Modell inkl. optionaler Schaden-Anreicherung. Delta-Engine,
-    Lobby-Ranking, Item-Sanity und Renderer bleiben unveraendert."""
+    Report-Modell. Bewusst ohne jede Online-Anreicherung: sobald das echte Match
+    verfuegbar ist, baut `_online_report` stattdessen den VOLLEN Match-V5-Report
+    (Entscheidung 2026-07-30) - dieser Kern ist nur noch die Stufe-1-/Fallback-
+    Quelle. Folge: kein Schaden, kein Impact, kein Endergebnis (`has_damage`/
+    `enriched`/`outcome_known` immer False, `impact_raw` leer). `enrich_damage`
+    steuert hier nur noch den Disclaimer-Status (versucht+gescheitert = "failed"
+    vs. bewusst abgeschaltet = "disabled")."""
     parts = pid_map["parts"]
     pid_team = pid_map["pid_team"]
     me_pid = _resolve_me_pid_dump(pid_map, ident)
@@ -779,46 +836,6 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
 
     by_pid = {p["pid"]: p for p in parts}
     my_team = by_pid[me_pid]["team"]
-
-    # --- Optionale Schaden-Anreicherung (Key-Pfad, graceful) ----------------
-    # Ist ein gueltiger Key da, Match+Timeline zum Dump nachladen und die
-    # Schaden-Serien in die Dump-Serien einspeisen. JEDER Fehler faellt auf
-    # key-frei zurueck - die Anreicherung darf den Report nie kaputtmachen.
-    enriched = False
-    enriched_match_id = None
-    impact_raw: dict = {}
-    if enrich_damage:
-        try:
-            # `enrich` braucht nur pid_map (Champion-Menge) - kein Snapshot-Blob.
-            data = enrich.fetch_damage_enrichment(cfg, [], pid_map,
-                                                  ident, log=log)
-        except Exception as exc:   # noqa: BLE001 - Robustheit: nie crashen
-            log(f"[postgame] Schaden-Anreicherung fehlgeschlagen ({exc!r}) - "
-                f"Report bleibt key-frei.")
-            data = None
-        if data:
-            n = ser["n_frames"]
-            # Timeline-Serien fuer ALLE 10 auf n_frames normieren (fehlende pids
-            # -> Nullserie), damit team_series/_cum_gain konsistente Laengen
-            # sehen. Neben `dmg` (Graphen/Deltas) auch `dmg_taken` und `cc_s` -
-            # sonst haette die Sup-vs-Sup-Kachel im Enrich-Pfad keine
-            # Phasen-Balken (Erweiterung 2026-07-25).
-            tl_series = data.get("series") or {"dmg": data["dmg_series"]}
-            for key in enrich.TIMELINE_SERIES:
-                seq_by_pid = tl_series.get(key)
-                if not seq_by_pid:
-                    continue      # Serie nicht geliefert -> leer lassen
-                for p in parts:
-                    ser["players"][p["pid"]][key] = enrich.fit_series(
-                        seq_by_pid.get(p["pid"]) or [], n)
-            for pid, val in data["final_dmg"].items():
-                if pid in finals:
-                    finals[pid]["dmg"] = val
-            impact_raw = data["impact_raw"]
-            enriched = True
-            enriched_match_id = data["match_id"]   # echte Match-ID (Trend-Record)
-            log(f"[postgame] Schaden aus Match {data['match_id']} angereichert "
-                f"(has_damage=True).")
 
     meta_parts = [{"pid": p["pid"], "team": p["team"], "role": p["role"]}
                   for p in parts]
@@ -850,8 +867,6 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
         deltas = analysis.phase_deltas(ser, pid, opp, role)
         _patch_vision_deltas(deltas, ser, pid, opp)
         ctx = analysis.kill_context(ser["events"]["kills"], pid,
-                                    {pp["pid"] for pp in parts
-                                     if pp["team"] == my_team},
                                     team_kills[my_team])
         deaths = analysis.death_phases(ser["events"]["kills"], pid)
         champ = p["champ"]
@@ -861,7 +876,11 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
         team_players.append({
             "pid": pid, "champ": champ, "role": role,
             "name": p["name"], "is_me": pid == me_pid,
-            "win": False,   # Live-Dump kennt kein Endergebnis (kein win-Feld)
+            # Der Live-Mitschnitt kennt kein Endergebnis (Port 2999 liefert es
+            # nicht) -> immer False, aber als UNBEKANNT markiert
+            # (outcome_known=False weiter unten). Das echte `win` traegt nur der
+            # volle Match-V5-Report (`_online_report`).
+            "win": False,
             "counterpart": ({"pid": opp, "champ": opp_part["champ"],
                              "name": opp_part["name"]} if opp_part else None),
             "deltas": deltas, "context": ctx, "deaths": deaths,
@@ -876,7 +895,7 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
     me_player = next(x for x in team_players if x["is_me"])
 
     # Endwerte aller 10 fuers Scoreboard: Item-Gold = gehaltenes Item-Gold
-    # (finals['gold']), Level = letzter Level-Frame, dmg nach Anreicherung.
+    # (finals['gold']), Level = letzter Level-Frame, dmg key-frei immer 0.
     sb_finals = {}
     for p in parts:
         pid = p["pid"]
@@ -888,26 +907,25 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
             "kda": (f["kills"], f["deaths"], f["assists"]),
         }
 
-    # --- Graph-Serien (Gold=Item-Gold, Vision=wardScore; Schaden nur mit Key) -
+    # --- Graph-Serien (Gold=Item-Gold, Vision=wardScore; KEIN Schaden) --------
     other_team = 200 if my_team == 100 else 100
     opp_pid = cmap.get(me_pid)
-    # 'dmg' nur bei erfolgreicher Anreicherung; sonst leer (Renderer laesst den
-    # Schaden-Block weg und zeigt unten den Disclaimer).
-    graph_metrics = ["spent", "vision"] + (["dmg"] if enriched else [])
+    # Der Live-Mitschnitt hat keinen Schaden an Champions -> die dmg-Serien
+    # bleiben leer (Renderer laesst den Schaden-Block weg und zeigt unten den
+    # Disclaimer).
+    graph_metrics = ["spent", "vision"]
     duo = {}
     for metric in graph_metrics:
         mine = ser["players"].get(me_pid, {}).get(metric, [])
         opp_s = ser["players"].get(opp_pid, {}).get(metric, []) if opp_pid else []
         duo[metric] = {"me": mine, "opp": opp_s}
-    if not enriched:
-        duo["dmg"] = {"me": [], "opp": []}
+    duo["dmg"] = {"me": [], "opp": []}
 
     tvt = {}
     for metric in graph_metrics:
         ts = series.team_series(ser, pid_team, metric)
         tvt[metric] = {"me": ts.get(my_team, []), "opp": ts.get(other_team, [])}
-    if not enriched:
-        tvt["dmg"] = {"me": [], "opp": []}
+    tvt["dmg"] = {"me": [], "opp": []}
     # Team-Kills (key-frei aus dem Kill-Event-Strom) - in allen Pfaden vorhanden.
     kill_ts = series.team_kill_series(ser, pid_team)
     tvt["kills"] = {"me": kill_ts.get(my_team, []),
@@ -933,38 +951,40 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
     # (key-frei). `item_gold` fehlt im Capture-Pfad (keine Preise im Speicher) ->
     # 'fertig' faellt dort auf reine Core-Zugehoerigkeit zurueck.
     seen_by_pid = _seen_from_items_ts(ser, id_to_name, item_gold)
+    # `impact_raw={}`: Composite-Impact braucht Schaden/Heilung/Getankt aus der
+    # Match-Summary - die gibt es nur im vollen Match-V5-Report.
     extra = _attach_phase4b(
         team_players=team_players, ser=ser, cmap=cmap, pid_team=pid_team,
         my_team=my_team, me_pid=me_pid, opp_pid=opp_pid,
         ranked_names=ranked_names, core_sets=core_sets, seen_by_pid=seen_by_pid,
-        impact_raw=impact_raw, has_damage=enriched, tvt=tvt)
+        impact_raw={}, has_damage=False, tvt=tvt)
 
     # Auto-Verdikt NACH _attach_phase4b (s. build_report). Der Live-/Dump-Pfad
-    # kennt kein Endergebnis -> outcome_known=False (kein irrefuehrendes "win").
+    # kennt kein Endergebnis -> outcome_known=False, damit weder Report noch
+    # Trend-Record ein irrefuehrendes "Niederlage" behaupten.
     verdict = analysis.verdict(
-        me_player, team_players, win=me_player["win"], outcome_known=False,
+        me_player, win=False, outcome_known=False,
         objectives=objectives, teamfights=extra.get("teamfights"),
-        impact=extra.get("impact"), scoreboard=scoreboard, has_damage=enriched,
+        impact=extra.get("impact"), scoreboard=scoreboard, has_damage=False,
         team_series=tvt)
 
     # --- Zustandsbewusster Schaden-Disclaimer (Bugfix 2026-07-24) -----------
-    # Der key-freie Report unterscheidet jetzt fuenf Zustaende, damit der
-    # Renderer einen EHRLICHEN Hinweis zeigt statt pauschal "kein Key" (realer
-    # Vorfall: Dev-Key war da, Stufe 2 scheiterte an Riots langsamer Indexierung,
-    # der falsche "kein Key"-Text blieb stehen):
-    #   ok       - Schaden liegt vor (has_damage=True) -> kein Disclaimer.
+    # Der key-freie Report unterscheidet vier Zustaende, damit der Renderer einen
+    # EHRLICHEN Hinweis zeigt statt pauschal "kein Key" (realer Vorfall: Dev-Key
+    # war da, Stufe 2 scheiterte an Riots langsamer Indexierung, der falsche
+    # "kein Key"-Text blieb stehen):
     #   no_key   - wirklich kein Key konfiguriert (active_api_keys leer).
-    #   pending  - Key da, Anreicherung laeuft noch (Auto-Report Stufe 1).
-    #   failed   - Key da, Anreicherung endgueltig gescheitert (Match nicht
+    #   pending  - Key da, der volle Report wird noch nachgeladen (Stufe 1).
+    #   failed   - Key da, das Match war nicht auffindbar/baubar (nicht
     #              rechtzeitig indexiert / kein Roster-Treffer).
     #   disabled - Key da, aber --no-enrich erzwingt den key-freien Modus.
+    # ("ok" gibt es hier nicht mehr: liegen die Match-Daten vor, kommt der Report
+    # komplett aus `build_report` und laeuft gar nicht durch diesen Kern.)
     # `status_override` (pending/failed) setzt der Auto-Report-Watcher; nur er
     # kennt den Kontext (Stufe 1 laeuft / Stufe 2 endgueltig gescheitert). `no_key`
     # gewinnt IMMER (auch ueber einen pending-Override), damit ohne Key nie
     # faelschlich "wird nachgeladen" erscheint.
-    if enriched:
-        damage_status = "ok"
-    elif not cfg.active_api_keys:
+    if not cfg.active_api_keys:
         damage_status = "no_key"
     elif status_override in ("pending", "failed"):
         damage_status = status_override
@@ -976,30 +996,35 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
     report = {
         "match_id": match_id,
         "patch": patch,
-        # Datenquelle: Live-Capture, ggf. um Timeline-Schaden angereichert.
-        "source": "live_dump+timeline" if enriched else "live_dump",
-        "has_damage": enriched,    # True nach Anreicherung, sonst Disclaimer unten
-        "damage_status": damage_status,   # ok/no_key/pending/failed/disabled
-        "enriched": enriched,      # explizites Flag fuer Renderer/Redesign
+        "source": "live_dump",     # Datenquelle: reiner Live-Client-Mitschnitt
+        "has_damage": False,       # kein Schaden an Champions -> Disclaimer unten
+        "damage_status": damage_status,   # no_key/pending/failed/disabled
+        "enriched": False,         # explizites Flag fuer Renderer/Redesign
         # Der Live-/Dump-Pfad kennt kein Endergebnis (win bleibt False, aber
         # unbekannt) -> outcome_known=False, damit der Trend-Record kein
         # irrefuehrendes "Niederlage" speichert.
         "outcome_known": False,
         "game_end": None,          # kein Match-Datum -> Trend nutzt die Erstellzeit
-        # Echte Match-ID (falls das Capture-Enrichment sie aufgeloest hat) - der
-        # Trend-Record laeuft dann unter der echten ID statt dem live_<...>-Stempel.
-        "enriched_match_id": enriched_match_id,
-        "impact_raw": impact_raw,  # Composite-Impact-Rohwerte je pid (nur mit Key)
+        # Platzhalter fuer die echte Match-ID (Schema-Stabilitaet fuer Trend/
+        # History): key-frei ist sie unbekannt, den vollen Report baut
+        # `_online_report` und setzt sie dort.
+        "enriched_match_id": None,
+        "impact_raw": {},          # Composite-Impact nur im vollen Match-Report
         "queue": queue_label,
         "duration_min": duration_min,
         "my_team": my_team,
-        "win": me_player["win"],
+        "win": False,
         "me": {"pid": me_pid, "champ": me_player["champ"],
                "role": me_player["role"], "name": me_player["name"],
                "puuid": None},
         "team": team_players,
         "duo_series": duo,
         "team_series": tvt,
+        # Ab welcher Minute die Serien gemessen (statt aufgefuellt) sind. Startet
+        # das Live-Capture erst mitten im Spiel, ist das > 0 und der Renderer
+        # graut den Bereich davor als "keine Daten" aus, statt ein erfundenes
+        # Plateau ab Minute 0 zu zeigen.
+        "data_start": ser.get("data_start", 0),
         "winprob": winprob,       # heuristische Gewinnchance je Minute (0..1)
         "ranking": ranking,
         "finals": sb_finals,
@@ -1016,8 +1041,12 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
 def run_from_dump(cfg: Config, dump_dir, *, me: str | None = None,
                   enrich_damage: bool = True, out_dir: Path | None = None,
                   log=print) -> Path:
-    """Baut den Dump-Report (key-frei, ggf. Schaden-angereichert) und schreibt
-    `postgame/<ordnername>.html`. `enrich_damage=False` erzwingt key-frei."""
+    """Baut den Dump-Report und schreibt `postgame/<match_id>.html`.
+
+    Wird das echte Match gefunden (Default `enrich_damage=True`), ist das der
+    VOLLE Match-V5-Report und die Datei laeuft unter der echten Match-ID; sonst
+    der key-freie Dump-Report unter dem Ordnernamen. `enrich_damage=False`
+    (`--no-enrich`) erzwingt key-frei."""
     report = build_report_from_dump(cfg, dump_dir, me=me,
                                     enrich_damage=enrich_damage, log=log)
     return _write_report(cfg, report, out_dir)
@@ -1031,8 +1060,8 @@ def run_from_capture(cfg: Config, result, *, me: str | None = None,
     """Baut den Report aus einem In-Memory-Capture und schreibt die HTML-Datei.
 
     `out_path` erzwingt einen konkreten Pfad - so schreiben Stufe 1 (key-frei)
-    und Stufe 2 (Schaden-Upgrade) des Auto-Reports **dieselbe** Datei. Ohne
-    `out_path` gilt `postgame/<result.match_id>.html`. `status_override`
+    und Stufe 2 (voller Match-Report) des Auto-Reports **dieselbe** Datei. Ohne
+    `out_path` gilt `postgame/<report-match_id>.html`. `status_override`
     (pending/failed) steuert den zustandsbewussten Disclaimer (Auto-Report:
     Stufe 1 = pending, endgueltiges Scheitern = failed)."""
     report = build_report_from_capture(cfg, result, me=me,

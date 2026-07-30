@@ -49,6 +49,119 @@ def _remove_one(lst: list, item) -> None:
         lst.remove(item)
 
 
+# --- Besessenheits-Korruption (Viego) ---------------------------------------
+# WARUM: Riot emittiert in Match-V5-Timelines bei Viegos Passive (er uebernimmt
+# den getoeteten Champion samt dessen Inventar) massenhaft ITEM_DESTROYED-Events
+# auf VIEGOS participantId - sowohl fuer seine EIGENEN gehaltenen Items als auch
+# fuer die des besessenen Champions, die er nie gekauft hat. Wiederhergestellt
+# wird nichts: es gibt keine Gegen-Events. Real gemessen (EUW1_7933910870, Viego
+# = pid 7): 156 Item-Events, davon Dutzende Phantom-Destroys; das naive Replay
+# loeschte damit reihenweise seine echten Items, die `spent`-Serie fiel wiederholt
+# auf 0 und `items_ts` endete mit [3031, 1029] statt des echten 6-Item-Builds.
+#
+# ERKENNUNG (zwei Kriterien, beide muessen greifen - empirisch kalibriert an 150
+# gecachten 16.15-Timelines = 1500 Spieler, davon 24 Viego):
+#
+#  1. **Burst-Groesse** (das eigentliche Trennmerkmal): ein Event-Burst
+#     (identischer `timestamp`) OHNE Kauf desselben Spielers, der >= 4
+#     ITEM_DESTROYED enthaelt. Gemessen: KEIN einziger der 1476 Nicht-Viego-
+#     Spieler hatte je einen No-Kauf-Burst mit mehr als 3 Destroys (legitim sind
+#     nur kleine Bursts: Consumables, Pet-Evolution, Boots-Upgrade); ALLE 24
+#     Viegos lagen bei 5-7. Die Schwelle 4 liegt exakt in der leeren Luecke.
+#  2. **Phantom-Destroys**: >= 3 Destroys auf Items, die der Spieler zu dem
+#     Zeitpunkt gar nicht haelt. Allein ist dieses Kriterium NICHT brauchbar
+#     (gemessen: 307 von 400 Spielern reissen 3 - Runen-Biskuits, Support-Wards,
+#     Trinkets und Pets werden ohne Kauf zerstoert); es dient nur als zweite
+#     Plausibilitaets-Klammer, damit ein grosser Burst allein noch kein
+#     Reparatur-Replay ausloest.
+CORRUPT_BURST_DESTROYS = 4
+PHANTOM_DESTROY_LIMIT = 3
+
+
+def _phantom_destroy_counts(frames: list, pids=None) -> dict:
+    """Je participantId: Zahl der ITEM_DESTROYED-Events auf einem Item, das der
+    Spieler zu diesem Zeitpunkt gar nicht haelt (nie gekauft bzw. schon wieder
+    weg). Erwerb = ITEM_PURCHASED oder ITEM_UNDO-`afterId` (wiederhergestellter
+    Verkauf); Abgang = SOLD/DESTROYED/UNDO-`beforeId`.
+
+    `pids`: optionale Einschraenkung auf bekannte Spieler (sonst alle).
+    Diagnose-Funktion ohne Seiteneffekt - Basis fuer `_corrupt_pids`."""
+    held: dict = {}
+    out: dict = {}
+    for frame in frames:
+        for ev in frame.get("events", []) or []:
+            pid = ev.get("participantId")
+            if pid is None or (pids is not None and pid not in pids):
+                continue
+            et = ev.get("type")
+            if et == "ITEM_PURCHASED":
+                held.setdefault(pid, []).append(ev.get("itemId"))
+            elif et == "ITEM_UNDO":
+                before, after = ev.get("beforeId"), ev.get("afterId")
+                if before:
+                    _remove_one(held.setdefault(pid, []), before)
+                if after:
+                    held.setdefault(pid, []).append(after)
+            elif et == "ITEM_SOLD":
+                _remove_one(held.setdefault(pid, []), ev.get("itemId"))
+            elif et == "ITEM_DESTROYED":
+                bag = held.setdefault(pid, [])
+                out.setdefault(pid, 0)
+                iid = ev.get("itemId")
+                if iid in bag:
+                    bag.remove(iid)
+                else:
+                    out[pid] += 1
+    return out
+
+
+def _item_bursts(frames: list, pids=None) -> dict:
+    """Item-Events je (pid, timestamp) buendeln -> {(pid, ts): (kaeufe, destroys)}.
+
+    Riot legt die Destroys der beim Zusammenbau verbrauchten Komponenten auf
+    EXAKT denselben `timestamp` wie den Kauf des fertigen Items (verifiziert an
+    EUW1_7933910870: ts=916128 zerstoert 6690/3051/1043 und kauft 6672). Ein
+    Burst mit Kauf ist damit ein echter Zusammenbau; die Besessenheits-Phantoms
+    stehen immer in reinen Destroy-Bursts."""
+    out: dict = {}
+    for frame in frames:
+        for ev in frame.get("events", []) or []:
+            pid = ev.get("participantId")
+            if pid is None or (pids is not None and pid not in pids):
+                continue
+            et = ev.get("type")
+            if et not in ("ITEM_PURCHASED", "ITEM_DESTROYED"):
+                continue
+            key = (pid, ev.get("timestamp"))
+            buys, kills = out.get(key, (0, 0))
+            if et == "ITEM_PURCHASED":
+                out[key] = (buys + 1, kills)
+            else:
+                out[key] = (buys, kills + 1)
+    return out
+
+
+def _corrupt_pids(frames: list, pids=None) -> tuple[set, set]:
+    """(korrumpierte pids, (pid, ts)-Paare mit Kauf) - s. Modul-Kommentar oben.
+
+    Korrumpiert ist ein Spieler, wenn er sowohl einen No-Kauf-Burst mit >=
+    CORRUPT_BURST_DESTROYS Destroys hat ALS AUCH >= PHANTOM_DESTROY_LIMIT
+    Phantom-Destroys. Fuer alle anderen bleibt das Replay unveraendert
+    (Paritaets-Garantie fuer saubere Timelines).
+
+    Die Kauf-Stempel fallen im selben Durchgang an und werden mitgegeben, damit
+    das Reparatur-Replay die Timeline nicht ein drittes Mal durchlaufen muss."""
+    bursts = _item_bursts(frames, pids)
+    buy_stamps = {key for key, (buys, _k) in bursts.items() if buys}
+    big = {pid for (pid, _ts), (buys, kills) in bursts.items()
+           if not buys and kills >= CORRUPT_BURST_DESTROYS}
+    if not big:
+        return set(), buy_stamps
+    phantoms = _phantom_destroy_counts(frames, big)
+    return ({pid for pid in big
+             if phantoms.get(pid, 0) >= PHANTOM_DESTROY_LIMIT}, buy_stamps)
+
+
 def _inventory_ids(frames: list, players: dict) -> dict:
     """Inventar-Replay je Spieler -> `items_ts`-Serie (Liste der zum Ende jeder
     Minute gehaltenen Item-IDs).
@@ -70,7 +183,20 @@ def _inventory_ids(frames: list, players: dict) -> dict:
     Winter's Approach->Fimbulwinter, Archangel's->Seraph's, Tear-Linie),
     Season-2026-Boots-Upgrades (in-place) und verbrauchten Consumables/Trinkets
     (0-500 G) - allesamt klein und ohne eigenes Timeline-Event, daher als
-    dokumentierte Toleranz akzeptiert (Median 0, ~2.8 % Lobby-Summe)."""
+    dokumentierte Toleranz akzeptiert (Median 0, ~2.8 % Lobby-Summe).
+
+    **Besessenheits-Haertung (Bugfix 2026-07-30):** Spieler, deren Event-Spur
+    durch Viegos Passive korrumpiert ist (s. `_corrupt_pids`), laufen ueber ein
+    Reparatur-Replay: fuer sie zaehlt ein ITEM_DESTROYED nur, wenn im selben
+    Event-Burst (identischer `timestamp`) auch ein ITEM_PURCHASED desselben
+    Spielers liegt - also nur der echte Komponenten-Verbrauch beim Zusammenbau.
+    Alle uebrigen Destroys sind Phantoms und werden ignoriert. Rest-Toleranz:
+    verbrauchte Consumables und Pet-Eier des korrumpierten Spielers bleiben im
+    Replay haengen (wenige hundert Gold) - bewusst akzeptiert, weil nur der
+    ohnehin korrupte Spieler betroffen ist und die Alternative (Inventar faellt
+    auf 0) massiv schlechter war. Fuer ALLE anderen Spieler ist das Replay
+    unveraendert (Paritaets-Garantie)."""
+    corrupt, buy_stamps = _corrupt_pids(frames, set(players))
     inv: dict[int, list] = {pid: [] for pid in players}
     snapshots: dict[int, list] = {pid: [] for pid in players}
     for frame in frames:
@@ -81,7 +207,12 @@ def _inventory_ids(frames: list, players: dict) -> dict:
                 continue
             if et == "ITEM_PURCHASED":
                 inv[pid].append(ev.get("itemId"))
-            elif et in ("ITEM_SOLD", "ITEM_DESTROYED"):
+            elif et == "ITEM_DESTROYED":
+                # Korrumpierter Spieler: nur Destroys im Kauf-Burst sind echt.
+                if pid in corrupt and (pid, ev.get("timestamp")) not in buy_stamps:
+                    continue
+                _remove_one(inv[pid], ev.get("itemId"))
+            elif et == "ITEM_SOLD":
                 _remove_one(inv[pid], ev.get("itemId"))
             elif et == "ITEM_UNDO":
                 # Undo macht einen Kauf ODER einen Verkauf rueckgaengig:
@@ -209,8 +340,12 @@ def build_series(timeline: dict, item_gold=None) -> dict:
                     "item": ev.get("itemId"),
                 })
 
+    # data_start = 0: die Match-V5-Timeline beginnt IMMER bei Spielbeginn, also
+    # ist jeder Frame gemessen. Das Feld existiert nur, damit Timeline- und
+    # Live-Pfad dieselbe Serien-Form haben (der Live-Pfad kann spaeter starten,
+    # s. live_series.data_start_minute).
     return {"frame_interval": interval, "n_frames": len(frames),
-            "players": players, "events": events}
+            "data_start": 0, "players": players, "events": events}
 
 
 def team_series(series: dict, pid_team: dict, metric: str) -> dict:

@@ -145,6 +145,11 @@ def extract_record(report: dict) -> dict:
     Objective-Praesenz und `has_damage`. Key-gebundene Felder bleiben leer/None,
     wenn der Report key-frei ist (die Aggregation ueberspringt sie).
 
+    Zusaetzlich fuer die Match-History-Seite (2026-07-29): `damage_status`
+    (Daten-Qualitaet des Reports) und `roster` (die 10 Champions als
+    Wiederfinde-Schluessel fuer den Retry). Aeltere Records ohne diese Felder
+    bleiben gueltig - alle Leser nutzen `.get()`.
+
     Die Record-ID ist die echte Match-ID, sobald bekannt (`enriched_match_id` aus
     dem Capture-Enrichment), sonst `match_id` (im Capture-Pfad der `live_<...>`-
     Stempel)."""
@@ -160,9 +165,23 @@ def extract_record(report: dict) -> dict:
     if not date_ms:
         date_ms = int(time.time() * 1000)
 
+    # Roster (alle 10 Champions) fuer den Retry der Match-History-Seite: nach
+    # einem Server-Neustart ist das In-Memory-Capture weg, der Record ist dann
+    # die einzige Quelle, um das Spiel per Roster-Match in der Match-History
+    # wiederzufinden (s. app/history.py).
+    roster = [(v or {}).get("champ") for v in
+              (report.get("ranked_names") or {}).values()]
+    roster = [c for c in roster if c]
+
     return {
         "match_id": record_id,
-        "source_match_id": report.get("match_id"),
+        # Stempel, unter dem die HTML-Datei liegt. Normalerweise die eigene
+        # `match_id`; der History-Retry (app/history.py) baut den vollen Report
+        # ueber die ECHTE ID, behaelt aber die vorhandene `live_<...>.html` -
+        # dann traegt er den Datei-Stempel hier explizit ein, damit der Record
+        # weiter zu dieser Datei gehoert (und der stale Stempel-Record unten
+        # verschwindet).
+        "source_match_id": report.get("source_match_id") or report.get("match_id"),
         "name": me.get("name"),
         "puuid": me.get("puuid"),
         "champ": me.get("champ"),
@@ -171,6 +190,12 @@ def extract_record(report: dict) -> dict:
         "date_ms": int(date_ms),
         "win": report.get("win") if report.get("outcome_known") else None,
         "has_damage": has_damage,
+        # Daten-Qualitaet des Reports (ok/pending/failed/no_key/disabled) fuer
+        # die Match-History-Seite. Der Timeline-Pfad setzt kein `damage_status`
+        # (dort liegt der Schaden per Definition vor) -> "ok" ableiten.
+        "damage_status": (report.get("damage_status")
+                          or ("ok" if has_damage else None)),
+        "roster": roster,
         "deltas": _total_deltas(me_card, has_damage),
         # Impact-Quote ist key-gebunden (Schaden/Heilung/Tank) -> key-frei leer.
         "impact_quote": _impact_quote(report) if has_damage else None,
@@ -194,22 +219,72 @@ def trend_dir(cfg) -> Path:
     return cfg.postgame_out_dir / "trend"
 
 
+def _drop_displaced_stamp(cfg, match_id: str, new_stamp, *, log=print) -> None:
+    """Die vom neuen Record VERDRAENGTE Stempel-Datei entfernen.
+
+    WARUM (Bugfix 2026-07-30, realer Vorfall): Es gibt genau EINEN Record je
+    Spiel (`<match_id>.json`), und sein `source_match_id` sagt, welche HTML-Datei
+    dazugehoert. Baut jemand dasselbe Spiel unter einem ANDEREN Stempel neu -
+    typischerweise `pipeline postgame <match_id>`, das den Record mit
+    `source_match_id == match_id` schreibt -, verliert die bisher verlinkte
+    `live_<...>.html` ihren Record ersatzlos. Sie bleibt als tote
+    "unbekannt"-Zeile in der Match-History liegen; ihr Retry fand ohne Record
+    weder Roster noch Datum und meldete ewig "nicht gefunden".
+
+    Deshalb raeumt der Record-Write die verdraengte Datei (und deren etwaigen
+    Stamm-Record) gleich mit weg - die Invariante "genau EINE Datei je Spiel"
+    gilt damit auch fuer den CLI-Pfad, nicht nur fuer den History-Retry.
+    Aufraeum-Fehler werden nur geloggt: sie duerfen den Record-Write nie
+    brechen."""
+    current = trend_dir(cfg) / f"{match_id}.json"
+    if not current.exists():
+        return
+    old = read_json(current)
+    old_stamp = old.get("source_match_id") if isinstance(old, dict) else None
+    if not old_stamp or old_stamp == new_stamp or old_stamp == match_id:
+        return
+    old_html = cfg.postgame_out_dir / f"{old_stamp}.html"
+    if not old_html.exists():
+        return
+    try:
+        old_html.unlink()
+        log(f"[postgame] Verdraengte Report-Datei {old_html.name} entfernt "
+            f"(Spiel {match_id} liegt jetzt unter {new_stamp}).")
+    except OSError as exc:
+        log(f"[postgame] Verdraengte Report-Datei {old_html.name} nicht "
+            f"loeschbar ({exc!r}).")
+        return
+    stale = trend_dir(cfg) / f"{old_stamp}.json"
+    try:
+        if stale.exists():
+            stale.unlink()
+    except OSError as exc:
+        log(f"[postgame] Stamm-Record {stale.name} nicht loeschbar ({exc!r}).")
+
+
 def write_record(cfg, report: dict, *, log=print) -> Path | None:
     """Extrahiert den Trend-Record aus dem Report-Modell und schreibt ihn nach
     `postgame/trend/<id>.json` (idempotent - der neueste Lauf gewinnt).
 
     Ist die echte Match-ID inzwischen bekannt (Capture-Enrichment) und weicht sie
     vom urspruenglichen Stempel ab, wird der stale Stempel-Record entfernt, damit
-    kein Doppel-Record desselben Spiels stehenbleibt. Jeder Fehler wird geloggt
-    und geschluckt - das Schreiben des Records darf den Report-Bau NIE brechen."""
+    kein Doppel-Record desselben Spiels stehenbleibt. Zeigte der BISHERIGE Record
+    desselben Spiels auf eine andere HTML-Datei, fliegt diese verdraengte Datei
+    mit (s. `_drop_displaced_stamp`) - sonst bleibt sie als record-lose
+    Karteileiche in der History stehen. Jeder Fehler wird geloggt und geschluckt -
+    das Schreiben des Records darf den Report-Bau NIE brechen."""
     try:
         record = extract_record(report)
         if not record.get("match_id"):
             return None
+        stamp = record.get("source_match_id")
+        try:
+            _drop_displaced_stamp(cfg, record["match_id"], stamp, log=log)
+        except Exception as exc:   # noqa: BLE001 - Aufraeumen ist Kuer
+            log(f"[postgame] Verdraengte Report-Datei nicht aufraeumbar ({exc!r}).")
         target = trend_dir(cfg) / f"{record['match_id']}.json"
         write_json(target, record)
         # Stale Stempel-Record aufraeumen (Capture: live_<...> -> echte ID).
-        stamp = record.get("source_match_id")
         if stamp and stamp != record["match_id"]:
             stale = trend_dir(cfg) / f"{stamp}.json"
             if stale.exists():

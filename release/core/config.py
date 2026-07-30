@@ -241,9 +241,11 @@ class Config:
                 except (TypeError, ValueError):
                     pass  # unbrauchbarer Wert -> Default (24 h) behalten
             # Eigene Identitaet fuer den Post-Game-Report (wer bin "ich" im
-            # Match). Top-Level `me:` (Riot-ID 'Name#Tag' oder PUUID). Optionaler
-            # Ausgabeordner unter postgame.out_dir (Default ROOT/postgame).
-            cfg.me = str(data.get("me", cfg.me) or "").strip()
+            # Match). Kanonisch `app.me:` (Riot-ID 'Name#Tag' oder PUUID);
+            # Top-Level `me:` bleibt als Fallback fuer Alt-/Release-Configs
+            # lesbar. Optionaler Ausgabeordner unter postgame.out_dir
+            # (Default ROOT/postgame).
+            cfg.me = str(app.get("me", data.get("me", cfg.me)) or "").strip()
             postgame = data.get("postgame", {}) or {}
             if postgame.get("out_dir"):
                 p = Path(str(postgame["out_dir"]))

@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from core.config import ROOT, VALID_ROLES, Config
 from engine import (items, knowledge, manifest, profiling, rec_partner,
                     recommend)
-from . import assets, demo, live_client
+from . import assets, demo, history, live_client
 
 app = FastAPI(title="League Active Game Helper")
 CFG = Config.load()
@@ -433,6 +433,82 @@ def set_role(update: RoleUpdate):
     STATE["role_override"] = update.role
     STATE["cache"] = (0.0, None)
     return {"ok": True}
+
+
+@app.get("/api/history")
+def get_history():
+    """Die letzten Post-Game-Reports fuer die Match-History-Seite.
+
+    Liefert {games, wins, losses, unknown, winrate_pct} (s. app/history.py).
+    Jeder Fehler wird zu einer leeren, aber wohlgeformten Antwort - die Seite
+    zeigt dann ihren Leer-Hinweis, statt einen 500 zu bekommen."""
+    try:
+        return history.list_games(CFG, log=print)
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Match-History nicht lesbar ({exc})")
+        return {"games": [], "wins": 0, "losses": 0, "unknown": 0,
+                "winrate_pct": None, "error": str(exc)}
+
+
+@app.post("/api/history/{match_id}/retry")
+def post_history_retry(match_id: str):
+    """Einen unvollstaendigen Report ueber die Riot-API neu befuellen lassen.
+
+    Antwortet sofort ({"started": true} bzw. {"started": false, "reason": ...});
+    die eigentliche Arbeit laeuft in einem Daemon-Thread, ihr Fortschritt kommt
+    ueber `retry_running`/`retry_error` in /api/history zurueck."""
+    try:
+        return history.start_retry(CFG, match_id, log=print)
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Retry {match_id} nicht startbar ({exc})")
+        return {"started": False, "reason": str(exc)}
+
+
+class HistoryLoad(BaseModel):
+    platform: str = ""      # 'EUW1', 'KR', ... (case-egal)
+    game_id: str = ""       # die numerische GameID aus dem Riot-Client
+
+
+@app.post("/api/history/load")
+def post_history_load(body: HistoryLoad):
+    """Ein Spiel ueber Platform + GameID aus dem Riot-Client nachladen.
+
+    Antwortet sofort ({"started": true, "match_id": ...} bzw. {"started": false,
+    "reason": ..., ggf. "url"}); die eigentliche Arbeit laeuft in einem
+    Daemon-Thread, ihr Fortschritt kommt ueber /api/history/load/<match_id>."""
+    try:
+        return history.start_load(CFG, body.platform, body.game_id, log=print)
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Laden von {body.platform}_{body.game_id} nicht "
+              f"startbar ({exc})")
+        return {"started": False, "reason": str(exc)}
+
+
+@app.get("/api/history/load/{match_id}")
+def get_history_load_state(match_id: str):
+    """Zustand eines manuellen Ladelaufs ("running"/"done"/"failed:<grund>"/null).
+
+    Eigener Endpoint, weil ein fehlgeschlagener Frisch-Load KEINE Datei
+    hinterlaesst - er taucht also in /api/history gar nicht auf."""
+    try:
+        return {"state": history.retry_state(match_id)}
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Ladezustand {match_id} nicht lesbar ({exc})")
+        return {"state": None, "error": str(exc)}
+
+
+@app.post("/api/history/retry-all")
+def post_history_retry_all():
+    """Alle unvollstaendigen Reports in einem Rutsch nachladen lassen.
+
+    Antwortet sofort ({"started": <anzahl>} bzw. {"started": 0, "reason": ...});
+    ein einzelner Thread arbeitet die Spiele sequenziell ab, der Fortschritt
+    kommt je Zeile ueber `retry_running` in /api/history zurueck."""
+    try:
+        return history.start_retry_all(CFG, log=print)
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Sammel-Retry nicht startbar ({exc})")
+        return {"started": 0, "reason": str(exc)}
 
 
 # Post-Game-Reports als statische Dateien ausliefern (der Frontend-Button

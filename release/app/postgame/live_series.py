@@ -51,8 +51,8 @@ def _empty_series() -> dict:
     die Delta-Engine (nutzt 'gold') als auch die Graphen (nutzen 'spent')
     dieselbe key-freie Gold-Metrik sehen.
     'dmg'/'dmg_taken'/'cc_s'/'pos'/'cur_gold'/'xp' bleiben leer (im Dump nicht
-    vorhanden); die drei Timeline-Serien dmg/dmg_taken/cc_s fuellt bei gueltigem
-    Key die Anreicherung nach (s. enrich.fetch_damage_enrichment)."""
+    vorhanden) und bleiben es auch: sobald das echte Match online ist, wird der
+    Report komplett aus Match-V5/Timeline gebaut statt nachgemergt (s. `enrich`)."""
     return {"gold": [], "cur_gold": [], "spent": [], "cs": [], "xp": [],
             "level": [], "dmg": [], "dmg_taken": [], "cc_s": [], "pos": [],
             "vision": [], "items_ts": []}
@@ -339,14 +339,31 @@ def _build_events(snapshots: list[dict], pid_map: dict) -> dict:
 
 # --- Oeffentlicher Einstieg -------------------------------------------------
 
+def data_start_minute(snapshots: list[dict]) -> int:
+    """Minute des ERSTEN echten Snapshots (= ab wann Daten aufgezeichnet wurden).
+
+    Wird der Live-Client erst mitten im Spiel mitgeschnitten (App ab Minute X
+    gestartet), fuellt `_snapshot_at` die Minuten davor mit den Werten des ersten
+    Snapshots auf - die Serien bleiben dichte Listen ab Minute 0, aber die Werte
+    vor dieser Minute sind **erfunden**. Der Report reicht die Zahl an den
+    Renderer, der den Bereich davor als "keine Daten" ausgraut."""
+    if not snapshots:
+        return 0
+    first_gt = (snapshots[0].get("gameData", {}) or {}).get("gameTime", 0.0) or 0.0
+    return max(0, int(float(first_gt) // 60))
+
+
 def build_series_from_dump(snapshots: list[dict], pid_map: dict) -> dict:
-    """Dump-Snapshots -> {frame_interval, n_frames, players, events} (gleiche
-    Form wie series.build_series). `frame_interval` ist 60000 (Minuten-Slots),
-    damit Frame-Index == Minute gilt (Konvention des Timeline-Builders)."""
+    """Dump-Snapshots -> {frame_interval, n_frames, data_start, players, events}
+    (gleiche Form wie series.build_series). `frame_interval` ist 60000
+    (Minuten-Slots), damit Frame-Index == Minute gilt (Konvention des
+    Timeline-Builders). `data_start` ist die Minute des ersten Snapshots - alles
+    davor ist Auffuellung, nicht Messung (s. `data_start_minute`)."""
     players = _build_players(snapshots, pid_map)
     events = _build_events(snapshots, pid_map)
     n_frames = len(next(iter(players.values()))["gold"]) if players else 0
     return {"frame_interval": 60000, "n_frames": n_frames,
+            "data_start": data_start_minute(snapshots),
             "players": players, "events": events}
 
 

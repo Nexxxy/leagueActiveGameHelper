@@ -4,6 +4,8 @@
 app:
   refresh_seconds: 15   # Auto-Refresh-Intervall des Frontends (Sekunden)
   auto_asset_download: true
+  #me: Name#Tag         # eigene Riot-ID (fuer die Schaden-Zuordnung; nur
+  #                     # zusammen mit riot.api_key unten sinnvoll)
 
 # Post-Game-Report: erzeugt nach jedem beendeten SR-Spiel automatisch einen
 # key-freien HTML-Report unter postgame/live_<zeitstempel>.html (Server muss
@@ -17,4 +19,4 @@ postgame:
 # (ein Disclaimer im Report erklaert die dann fehlenden Teile).
 #riot:
 #  api_key: ...        # hier den eigenen Riot-API-Key eintragen
-#me: Name#Tag          # eigene Riot-ID (fuer die Schaden-Zuordnung)
+# (die eigene Riot-ID gehoert nach app.me, s. oben im app-Block)

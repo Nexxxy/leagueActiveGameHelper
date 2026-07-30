@@ -63,6 +63,7 @@ class LiveCapture:
         self._me_ident: str | None = None
         self._started_at: str = ""       # Wall-Clock-Stempel des ersten Polls
         self._first_ext: dict | None = None   # Extrakt des ersten Polls (Frame-0-Fallback)
+        self._first_gt: float = -1.0           # gameTime des ersten Polls
         self._minute_ext: list[dict] = []      # finalisierte Minuten-Extrakte
         self._latest_ext: dict | None = None   # Extrakt des letzten Polls
         self._latest_gt: float = -1.0          # gameTime des letzten Polls
@@ -86,6 +87,18 @@ class LiveCapture:
         if self._latest_gt < 0.0:
             return 0
         return int(self._latest_gt // 60) + 1
+
+    @property
+    def data_start(self) -> int:
+        """Minute des ERSTEN Polls - ab hier sind die Serien gemessen.
+
+        Startet die App erst mitten im Spiel, tragen die Minuten davor den Wert
+        des ersten Polls (Frame-0-Fallback in `_advance`) - erfunden, nicht
+        gemessen. Der Renderer graut diesen Bereich aus (Paritaet zum Datei-Pfad,
+        s. live_series.data_start_minute)."""
+        if self._first_gt < 0.0:
+            return 0
+        return max(0, int(self._first_gt // 60))
 
     # --- Poll-Verarbeitung --------------------------------------------------
     def feed(self, raw: dict) -> None:
@@ -115,6 +128,9 @@ class LiveCapture:
             # Poll (identisch zu live_series._snapshot_at, das dann snapshots[0]
             # zurueckgibt).
             self._first_ext = ext
+            # gameTime des ersten Polls = ab hier sind die Werte gemessen; alles
+            # davor ist Auffuellung (s. `data_start`).
+            self._first_gt = gt
 
         # Minuten-Slots finalisieren, deren Marke (M·60) der neue Poll passiert
         # hat. Vor dem Passieren traegt Slot M den letzten Poll mit gt <= M·60 -
@@ -166,6 +182,7 @@ class LiveCapture:
         players = live_series.assemble_players(minute_ext, pid_map)
         events = live_series.build_events_from_list(self._last_events, pid_map)
         ser = {"frame_interval": 60000, "n_frames": n_frames,
+               "data_start": self.data_start,
                "players": players, "events": events}
         return CaptureResult(
             pid_map=pid_map,

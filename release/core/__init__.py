@@ -9,6 +9,7 @@ Inhalt:
 - `ddragon`  Data-Dragon-Statik (Versionen, Item-/Champion-Daten)
 - `riot_api` RiotClient (Rate-Limits, Round-Robin, Retry)
 - `cacheio`  JSON-Cache-I/O, Frische-Pruefung, Skip-Marker
+- `shardstore` JSONL-Shard-Store fuer den Roh-Cache (Layer 0)
 - `stats`    Statistische Hilfsfunktionen (Shrinkage)
 
 Alle anderen Pakete duerfen hierauf zugreifen (`engine`, `pipeline`, `app`);

@@ -70,16 +70,64 @@ def _axis_label(v) -> str:
     return f"{v:.0f}"
 
 
+# --- Grauzone "keine Daten" (spaet gestartetes Live-Capture) ----------------
+
+# Ab welchem Anteil der Plotbreite die Grauzone breit genug fuer ihren Text ist.
+# Darunter bleibt nur die Flaeche - ein abgeschnittenes/ueberlappendes Label waere
+# schlechter als gar keins (die Flaeche allein sagt schon "hier fehlt was").
+_NODATA_MIN_TEXT_FRAC = 0.15
+
+
+def _clamp_data_start(data_start, n: int) -> int:
+    """`data_start` robust auf 0..n begrenzen (fehlendes/kaputtes Feld -> 0).
+
+    Alte persistierte Reports tragen das Feld nicht - dann 0, also kein
+    Verhaltensunterschied zum Stand vor dem Feature."""
+    try:
+        ds = int(data_start or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(ds, n))
+
+
+def _nodata_zone(ds: int, x_ds: float, *, pad_l: int, pad_t: int,
+                 plot_w: float, plot_h: float) -> tuple[str, str]:
+    """(Rechteck, Label) fuer den nicht aufgezeichneten Bereich vor Minute `ds`.
+
+    Das Rechteck gehoert VOR die Gridlines (Hintergrund), das Label ans Ende
+    (ueber die Kurven). Zwei Rueckgabewerte, damit der Aufrufer sie getrennt
+    einsortieren kann. Ist die Zone leer oder sehr schmal
+    (< `_NODATA_MIN_TEXT_FRAC` der Plotbreite), bleibt das Label leer."""
+    w = x_ds - pad_l
+    if ds <= 0 or w <= 0:
+        return "", ""
+    rect = (f'<rect x="{pad_l}" y="{pad_t}" width="{w:.1f}" '
+            f'height="{plot_h:.1f}" class="nodata"/>')
+    if w < plot_w * _NODATA_MIN_TEXT_FRAC:
+        return rect, ""
+    # 4 px ueber der Plot-Mitte: im Gewinnchance-Chart liegt dort die betonte
+    # 50-%-Linie - eine Baseline genau darauf sieht wie unterstrichener Text aus.
+    label = (f'<text x="{pad_l + w / 2:.1f}" y="{pad_t + plot_h / 2 - 4:.1f}" '
+             f'class="nodata-lab" text-anchor="middle">'
+             f'keine Daten (ab Min {ds} aufgezeichnet)</text>')
+    return rect, label
+
+
 # --- SVG-Liniendiagramm -----------------------------------------------------
 
 def _line_chart(title: str, unit: str, lines: list, *, width: int = 560,
-                height: int = 240) -> str:
+                height: int = 240, data_start: int = 0) -> str:
     """Inline-SVG-Liniendiagramm mit Achsen (Redesign 2026-07-24).
 
     `lines`: Liste (values, stroke, label). X-Achse = Minute (Index) mit
     Gridlines + Beschriftung alle 5 min; Y-Achse mit 3-4 Zwischen-Gridlines und
     Wert-Labels. Groesser als zuvor (default 560x240) und im 2-Spalten-Grid
-    dargestellt. Leere/kurze Serien werden robust behandelt."""
+    dargestellt. Leere/kurze Serien werden robust behandelt.
+
+    `data_start`: erste Minute mit ECHTEN Daten (Live-Capture, das erst mitten im
+    Spiel gestartet wurde). Ist sie > 0, beginnen Kurven und Y-Skalierung erst
+    dort und der Bereich davor wird ausgegraut - die X-Achse bleibt absolut
+    (Minute 12 sitzt bei x(12), Spielbeginn links bei 0)."""
     lines = [(vals, col, lab) for vals, col, lab in lines if vals]
     if not lines:
         return f'<div class="chart-empty">{_esc(title)}: keine Daten</div>'
@@ -89,8 +137,15 @@ def _line_chart(title: str, unit: str, lines: list, *, width: int = 560,
     plot_w = width - pad_l - pad_r
     plot_h = height - pad_t - pad_b
     n = max(len(v) for v, _, _ in lines)
-    vmax = max((max(v) for v, _, _ in lines if v), default=1) or 1
-    vmin = min((min(v) for v, _, _ in lines if v), default=0)
+    ds = _clamp_data_start(data_start, n)
+    if ds >= n:
+        # Theoretisch: kein einziger gemessener Frame -> nichts zu zeigen.
+        return f'<div class="chart-empty">{_esc(title)}: keine Daten</div>'
+    # Y-Skalierung NUR aus den echten Werten - das aufgefuellte Plateau davor
+    # darf die Achse nicht verzerren.
+    real = [v[ds:] for v, _, _ in lines]
+    vmax = max((max(s) for s in real if s), default=1) or 1
+    vmin = min((min(s) for s in real if s), default=0)
     vmin = min(vmin, 0)
     span = (vmax - vmin) or 1
 
@@ -102,6 +157,10 @@ def _line_chart(title: str, unit: str, lines: list, *, width: int = 560,
 
     parts = [f'<svg viewBox="0 0 {width} {height}" class="chart" '
              f'role="img" aria-label="{_esc(title)}">']
+
+    nodata_rect, nodata_lab = _nodata_zone(
+        ds, x(ds), pad_l=pad_l, pad_t=pad_t, plot_w=plot_w, plot_h=plot_h)
+    parts.append(nodata_rect)
 
     # Y-Gridlines + Wert-Labels (Baseline + 3 Zwischenschritte bis vmax).
     for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -122,10 +181,16 @@ def _line_chart(title: str, unit: str, lines: list, *, width: int = 560,
                      f'text-anchor="middle">{m}</text>')
 
     for vals, col, _lab in lines:
-        pts = " ".join(f"{x(i):.1f},{y(val):.1f}" for i, val in enumerate(vals))
+        # Erst ab der ersten gemessenen Minute zeichnen; x(i) bleibt absolut, die
+        # Kurve wird also nicht nach links gestaucht, sondern startet spaeter.
+        real_pts = [(i, val) for i, val in enumerate(vals) if i >= ds]
+        if not real_pts:
+            continue
+        pts = " ".join(f"{x(i):.1f},{y(val):.1f}" for i, val in real_pts)
         parts.append(f'<polyline points="{pts}" fill="none" stroke="{col}" '
                      f'stroke-width="2.2" stroke-linejoin="round" '
                      f'stroke-linecap="round"/>')
+    parts.append(nodata_lab)
     parts.append("</svg>")
 
     legend = " ".join(
@@ -153,7 +218,7 @@ _C_LOSS_FILL = "#BC4761"     # Flaeche unter 50 % (Loss-Ton)
 
 
 def _winprob_chart(values: list, *, width: int = 1160,
-                   height: int = 260) -> str:
+                   height: int = 260, data_start: int = 0) -> str:
     """Volle-Breite-Chart der heuristischen Gewinnchance (0-100 %) je Minute.
 
     Y-Achse fix 0-100 % mit betonter 50-%-Mittellinie; die Flaeche zwischen Kurve
@@ -161,13 +226,20 @@ def _winprob_chart(values: list, *, width: int = 1160,
     identische Flaechen-Pfade, je auf die obere/untere Haelfte geclippt - CSP-safe,
     ohne Skript). X-Achse wie die uebrigen Charts: Minuten-Ticks alle 5 min.
     Leere Serie (zu kurzes Spiel, s. analysis.WINPROB_MIN_FRAMES) -> "" , der
-    Aufrufer laesst den Chart dann ganz weg."""
+    Aufrufer laesst den Chart dann ganz weg.
+
+    `data_start` wie in `_line_chart`: Kurve UND Flaechen beginnen erst dort, der
+    Bereich davor wird ausgegraut (die winprob-Werte davor stammen aus den
+    aufgefuellten Serien und sind damit erfunden)."""
     if not values:
         return ""
     pad_l, pad_r, pad_t, pad_b = 46, 12, 16, 24
     plot_w = width - pad_l - pad_r
     plot_h = height - pad_t - pad_b
     n = len(values)
+    ds = _clamp_data_start(data_start, n)
+    if ds >= n:
+        return ""
 
     def x(i):
         return pad_l + (plot_w * i / max(1, n - 1))
@@ -184,6 +256,9 @@ def _winprob_chart(values: list, *, width: int = 1160,
         f'width="{plot_w}" height="{y_mid - pad_t:.1f}"/></clipPath>'
         f'<clipPath id="wp-below"><rect x="{pad_l}" y="{y_mid:.1f}" '
         f'width="{plot_w}" height="{pad_t + plot_h - y_mid:.1f}"/></clipPath></defs>')
+    nodata_rect, nodata_lab = _nodata_zone(
+        ds, x(ds), pad_l=pad_l, pad_t=pad_t, plot_w=plot_w, plot_h=plot_h)
+    parts.append(nodata_rect)
 
     # Y-Gridlines + Prozent-Labels; 50 % ist die betonte Mittellinie.
     for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -202,10 +277,12 @@ def _winprob_chart(values: list, *, width: int = 1160,
         parts.append(f'<text x="{xx:.1f}" y="{height - 6}" class="tick-x" '
                      f'text-anchor="middle">{m}</text>')
 
-    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(values))
+    # Kurve und Flaechen erst ab der ersten gemessenen Minute (x bleibt absolut).
+    real = [(i, v) for i, v in enumerate(values) if i >= ds]
+    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in real)
     # Flaechen-Pfad: Kurve hin, auf der 50-%-Linie zurueck.
-    area = (f'M {x(0):.1f},{y_mid:.1f} L '
-            + " L ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(values))
+    area = (f'M {x(ds):.1f},{y_mid:.1f} L '
+            + " L ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in real)
             + f' L {x(n - 1):.1f},{y_mid:.1f} Z')
     parts.append(f'<path d="{area}" fill="{_C_WIN_FILL}" fill-opacity="0.18" '
                  f'clip-path="url(#wp-above)"/>')
@@ -214,6 +291,7 @@ def _winprob_chart(values: list, *, width: int = 1160,
     parts.append(f'<polyline points="{pts}" fill="none" '
                  f'stroke="{_C_ME_STROKE}" stroke-width="2.2" '
                  f'stroke-linejoin="round" stroke-linecap="round"/>')
+    parts.append(nodata_lab)
     parts.append("</svg>")
 
     return (f'<div class="chart-box chart-wide">'
@@ -233,6 +311,9 @@ def _duo_and_team_charts(report: dict) -> str:
 
     duo = report["duo_series"]
     tvt = report["team_series"]
+    # Erste gemessene Minute (Live-Capture kann mitten im Spiel gestartet sein);
+    # fehlt das Feld (alte persistierte Reports), gilt 0 = alles gemessen.
+    ds = report.get("data_start", 0)
     blocks = []
 
     # Schaden-Diagramme nur, wenn Schaden vorliegt (Timeline-Pfad). Key-frei
@@ -250,7 +331,7 @@ def _duo_and_team_charts(report: dict) -> str:
         blocks.append(_line_chart(
             f"{me_champ} vs. {opp_champ} — {unit}", unit,
             [(d.get("me", []), _C_ME_STROKE, me_champ),
-             (d.get("opp", []), _C_OPP_STROKE, opp_champ)]))
+             (d.get("opp", []), _C_OPP_STROKE, opp_champ)], data_start=ds))
     # Team vs. Team (zusaetzlich Kills + aufsummierte Champion-Level, key-frei in
     # allen Pfaden). Drittes Tupel-Element = Titel-Suffix (fuer Level abweichend
     # von der Achsen-Einheit: Titel 'Level (Summe)', Einheit 'Level').
@@ -261,11 +342,11 @@ def _duo_and_team_charts(report: dict) -> str:
         blocks.append(_line_chart(
             f"Team vs. Team — {title_suffix}", unit,
             [(t.get("me", []), _C_ME_STROKE, "Eigenes Team"),
-             (t.get("opp", []), _C_OPP_STROKE, "Gegner")]))
+             (t.get("opp", []), _C_OPP_STROKE, "Gegner")], data_start=ds))
 
     # Gewinnchance zuletzt und ueber die volle Breite (eigene Zeile im Grid) -
     # sie fasst alle Team-Signale darueber zu EINER Kurve zusammen.
-    blocks.append(_winprob_chart(report.get("winprob") or []))
+    blocks.append(_winprob_chart(report.get("winprob") or [], data_start=ds))
 
     return '<div class="chart-grid">' + "".join(blocks) + "</div>"
 
@@ -405,7 +486,7 @@ def _gank_strip(p: dict, duration_min: float) -> str:
         opp_label = cp.get("champ") or "Gegner"
         lanes.append(_gank_lane(opp_times, span, "gk-dot-opp", opp_label,
                                 "gk-lab-opp"))
-    return (f'<div class="gk"><div class="gk-h">Gank-/Aktiv-Timing</div>'
+    return ('<div class="gk"><div class="gk-h">Gank-/Aktiv-Timing</div>'
             + "".join(lanes) + "</div>")
 
 
@@ -518,7 +599,8 @@ def _team_card(p: dict, duration_min: float = 0.0) -> str:
       {_build_replay_html(p)}
       {gank}
       <div class="tc-foot">
-        <span title="Tode Early 0–10 / Mid 10–20 / Late 20+">Tode: {dp['early']} · {dp['mid']} · {dp['late']}{dk_txt}</span>
+        <span title="Tode Early 0–10 / Mid 10–20 / Late 20+">Tode:
+          {dp['early']} · {dp['mid']} · {dp['late']}{dk_txt}</span>
         <span class="tc-items">{item_line}</span>
       </div>
       <div class="tc-foot tc-foot-2">{obj_html}</div>
@@ -642,7 +724,8 @@ def _objectives_block(report: dict) -> str:
         <div class="mini-h">Objectives (eigenes Team vs. Gegner)</div>
         <div class="stat-inline">
           <div class="si"><div class="si-v">{tw['me']} : {tw['opp']}</div><div class="si-l">Türme</div></div>
-          <div class="si"><div class="si-v">{len(el['me'])} : {len(el['opp'])}</div><div class="si-l">Elite-Monster</div></div>
+          <div class="si"><div class="si-v">{len(el['me'])} : {len(el['opp'])}</div>
+            <div class="si-l">Elite-Monster</div></div>
         </div>
         <p class="note"><strong>Eigene Elite-Kills:</strong> {elite_list(el['me'])}</p>
         <p class="note"><strong>Gegner:</strong> {elite_list(el['opp'])}</p>
@@ -969,6 +1052,17 @@ _DISCLAIMER_BODY = {
 }
 
 
+# Anker-Id des Disclaimer-Blocks - der Status-Chip oben im Header verlinkt
+# darauf, damit ein Klick direkt zur ausfuehrlichen Begruendung springt.
+_DISCLAIMER_ID = "datengrundlage"
+
+# Zusatzsatz fuer den pending-Text, wenn bereits der spaete Zweitversuch laeuft
+# (Riot indexiert manche Matches erst nach Minuten) - ehrlicher Hinweis, dass es
+# der LETZTE Anlauf ist.
+_PENDING_RETRY_NOTE = (" Der erste Anlauf blieb erfolglos; dies ist der späte "
+                       "Zweitversuch — danach wird nicht weiter nachgeladen.")
+
+
 def _disclaimer_block(report: dict) -> str:
     """Zustandsbewusster Disclaimer bei fehlenden Schadensdaten.
 
@@ -980,11 +1074,55 @@ def _disclaimer_block(report: dict) -> str:
         return ""
     status = report.get("damage_status", "no_key")
     body = _DISCLAIMER_BODY.get(status, _DISCLAIMER_BODY["no_key"])
+    if status == "pending" and (report.get("enrich_progress") or {}).get("is_retry"):
+        body += _PENDING_RETRY_NOTE
     return f"""
-  <div class="disclaimer">
+  <div class="disclaimer" id="{_DISCLAIMER_ID}">
     <div class="label">Hinweis zur Datengrundlage</div>
     <p>{body}</p>
   </div>"""
+
+
+# Status-Chip oben im Header (Nutzer-Wunsch 2026-07-28): derselbe Zustand wie der
+# Disclaimer unten, nur als kurzes Label mit Farbe - die Datenlage ist damit
+# sofort sichtbar, ohne bis zum Report-Ende zu scrollen. (Label, CSS-Farbe).
+_STATUS_CHIP = {
+    "ok": ("✓ Daten vollständig", "var(--win)"),
+    "pending": ("⏳ Schaden-Analyse wird nachgeladen …", "var(--accent)"),
+    "failed": ("Schaden-Analyse fehlgeschlagen — Report key-frei", "var(--loss)"),
+    "no_key": ("Key-frei — ohne Schaden-Analyse", "var(--muted)"),
+    "disabled": ("Key-frei (--no-enrich)", "var(--muted)"),
+}
+
+
+def _status_chip(report: dict) -> str:
+    """Erster Chip der meta-row: Daten-Status aus has_damage/damage_status.
+
+    Bei Status != ok ist der Chip ein Anker-Link auf den Disclaimer unten (dort
+    steht die ausfuehrliche Begruendung). Liegt beim Nachladen ein
+    Fortschritts-Feld vor (`enrich_progress`, gesetzt von postgame_watch Stufe 2
+    nach jedem Fehlversuch), zeigt der pending-Chip den echten Versuchszaehler
+    statt nur '…'."""
+    if report.get("has_damage", True):
+        status = "ok"
+    else:
+        status = report.get("damage_status", "no_key")
+        if status not in _STATUS_CHIP:
+            status = "no_key"     # Alt-Reports / unbekannter Status
+    label, col = _STATUS_CHIP[status]
+    if status == "pending":
+        prog = report.get("enrich_progress") or {}
+        attempt, retries = prog.get("attempt"), prog.get("retries")
+        if attempt and retries:
+            label = (f"⏳ Schaden-Analyse wird nachgeladen — Versuch "
+                     f"{int(attempt)}/{int(retries)}")
+            if prog.get("is_retry"):
+                label += " (später Zweitversuch)"
+    style = f"color:{col};border-color:{col}"
+    if status == "ok":
+        return f'<span class="chip" style="{style}">{label}</span>'
+    return (f'<a class="chip chip-link" style="{style}" '
+            f'href="#{_DISCLAIMER_ID}">{label}</a>')
 
 
 def render_html(report: dict) -> str:
@@ -994,8 +1132,10 @@ def render_html(report: dict) -> str:
     has_dmg = report.get("has_damage", True)
     live_dump = report.get("source") == "live_dump"
     # Der Live-Dump kennt kein Endergebnis (kein win-Feld) -> neutraler Chip
-    # statt einer irrefuehrenden "Niederlage".
-    if live_dump:
+    # statt einer irrefuehrenden "Niederlage". Das gilt auch fuer einen
+    # angereicherten Live-Report, dessen Match kein `win` trug
+    # (outcome_known=False) - der Chip haengt am Wissen, nicht an der Quelle.
+    if live_dump or not report.get("outcome_known", True):
         result, result_col = "Live-Mitschnitt", "var(--muted)"
     else:
         result = "Sieg" if win else "Niederlage"
@@ -1079,8 +1219,8 @@ def render_html(report: dict) -> str:
             "dein Team, rechts der Gegner). Gefallene sind durchgestrichen und "
             "ausgegraut.",
             _teamfight_section(report)))
-    sections = "".join(_section(i, t, l, b)
-                       for i, (t, l, b) in enumerate(specs, start=1))
+    sections = "".join(_section(i, t, lede, b)
+                       for i, (t, lede, b) in enumerate(specs, start=1))
 
     return f"""<title>Post-Game {_esc(report['match_id'])} — {_esc(me['champ'])}</title>
 <style>
@@ -1090,9 +1230,8 @@ def render_html(report: dict) -> str:
   <header>
     <div class="eyebrow">League of Legends · Post-Game-Report</div>
     <h1>{_esc(me['champ'])} <span class="tag">{_esc((me['role'] or '').title())}</span></h1>
-    <p class="sub">Vergleich <strong>innerhalb der tatsächlich gespielten Lobby</strong> —
-      jeder Spieler gegen seinen direkten Rollen-Gegenpart, nicht gegen High-Elo.</p>
     <div class="meta-row">
+      {_status_chip(report)}
       <span class="chip" style="color:{result_col};border-color:{result_col}">{result}</span>
       <span class="chip">{_esc(report['queue'])}</span>
       <span class="chip">{report['duration_min']:.0f} min</span>
@@ -1168,6 +1307,9 @@ h1 .tag{color:var(--muted);font-weight:500;}
 .meta-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px;}
 .chip{font-family:var(--mono);font-size:12px;color:var(--ink-2);background:var(--card);
   border:1px solid var(--line);border-radius:999px;padding:5px 12px;}
+/* Status-Chip als Sprung-Link auf den Disclaimer: optisch ein Chip, kein Link. */
+a.chip-link{text-decoration:none;display:inline-block;}
+a.chip-link:hover{background:var(--card-2);}
 .verdict{margin:34px 0 12px;background:var(--card);border:1px solid var(--line);
   border-left:3px solid var(--accent);border-radius:12px;padding:22px 26px;box-shadow:var(--shadow);}
 .verdict .label{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
@@ -1221,6 +1363,10 @@ h2{font-size:clamp(20px,3vw,26px);margin:0;letter-spacing:-.01em;font-weight:750
 .chart .axis{stroke:var(--line-strong);stroke-width:1;}
 .chart .grid{stroke:var(--line);stroke-width:1;stroke-dasharray:2 3;}
 .chart .tick-x,.chart .tick-y{font-family:var(--mono);font-size:9.5px;fill:var(--muted);}
+/* "keine Daten"-Zone: Live-Capture erst ab Minute X mitgelaufen -> der Bereich
+   davor ist Auffuellung, nicht Messung. --muted traegt in beiden Themes. */
+.chart .nodata{fill:var(--muted);fill-opacity:.14;}
+.chart .nodata-lab{font-family:var(--mono);font-size:10px;fill:var(--muted);}
 .chart-empty{background:var(--card);border:1px dashed var(--line);border-radius:12px;
   padding:20px;color:var(--muted);font-size:13px;font-family:var(--mono);}
 
@@ -1236,12 +1382,14 @@ h2{font-size:clamp(20px,3vw,26px);margin:0;letter-spacing:-.01em;font-weight:750
 .tc-kda{font-family:var(--mono);font-weight:700;font-size:15px;text-align:right;}
 .tc-kda small{display:block;color:var(--muted);font-weight:500;font-size:11px;}
 .me-badge{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.1em;
-  background:var(--accent-soft);color:var(--accent);padding:2px 6px;border-radius:5px;margin-left:8px;vertical-align:middle;}
+  background:var(--accent-soft);color:var(--accent);padding:2px 6px;border-radius:5px;
+  margin-left:8px;vertical-align:middle;}
 .pb-head{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;
   color:var(--muted);margin-bottom:8px;}
 .pb-row{display:grid;grid-template-columns:96px 1fr 62px;align-items:center;gap:10px;margin-bottom:7px;}
 .pb-lab{font-family:var(--mono);font-size:11px;color:var(--ink-2);}
-.pb-track{position:relative;height:18px;background:var(--card-2);border:1px solid var(--line);border-radius:5px;overflow:hidden;}
+.pb-track{position:relative;height:18px;background:var(--card-2);
+  border:1px solid var(--line);border-radius:5px;overflow:hidden;}
 .pb-mid{position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--line-strong);}
 .pb-fill{position:absolute;top:2px;bottom:2px;border-radius:3px;}
 .pb-val{font-family:var(--mono);font-size:12.5px;font-weight:700;text-align:right;}
@@ -1641,8 +1789,8 @@ def render_trend_html(agg: dict, *, ident: str | None = None) -> str:
          "Was sich durch mehrere Spiele zieht (konsistenteste zuerst).",
          f'<ul class="tr-recur">{recur_html}</ul>'),
     ]
-    sections = "".join(_section(i, t, l, b)
-                       for i, (t, l, b) in enumerate(specs, start=1))
+    sections = "".join(_section(i, t, lede, b)
+                       for i, (t, lede, b) in enumerate(specs, start=1))
 
     footer = (f"Trend über {n} Spiele · Zeitraum {d_from} – {d_to} · "
               f"{keyless} von {n} Records key-frei (ohne Schaden-Daten) · "

@@ -155,6 +155,18 @@ def for_champion(champion: str, role: str | None = None) -> tuple[str, dict]:
     return best, roles[best]
 
 
+def next_after(champion: str, role: str | None = None) -> dict:
+    """Uebergangs-Bigramm des Champion+Rollen-Eintrags (pipeline T1):
+    `{<Vorgaenger-Item>: [{item, count, win_rate}, ...]}` - was Spieler nach
+    einem bestimmten FERTIGEN Item als naechstes fertiges Item gebaut haben.
+
+    Leeres Dict, wenn die Kombi unbekannt ist ODER die builds.yaml den Block
+    nicht kennt (alte/gepinnte KBs, Test-Fixtures). Die Leseseite faellt dann
+    auf einen neutralen Lift zurueck - der Block ist rein additiv."""
+    _role, entry = for_champion(champion, role)
+    return entry.get("next_after") or {}
+
+
 def for_class(bucket: str | None, role: str | None) -> dict:
     """Liefert den Klassen-Eintrag (Bucket + Rolle) aus der `classes:`-Sektion
     der builds.yaml - Fallback fuer duenne Champion-Kombis. Leeres Dict, wenn

@@ -107,6 +107,14 @@
   #reportBanner .report-badge { display: inline-block; margin-left: 12px;
     padding: 2px 12px; border-radius: 20px; vertical-align: middle;
     font-size: .78rem; font-weight: 600; background: rgba(16, 20, 26, .28); }
+  /* Link auf die Match-History-Seite: bewusst DEZENT (Sekundaer-Button, kein
+     Verlauf/Glow) - er steht immer unten und darf dem Report-Banner nicht die
+     Aufmerksamkeit nehmen. Immer sichtbar, also kein [hidden]-Handling noetig. */
+  #historyLink { display: inline-block; margin: 34px 0 6px; padding: 9px 16px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--card);
+    color: var(--muted); text-decoration: none; font-size: .9rem;
+    font-weight: 600; }
+  #historyLink:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -142,6 +150,9 @@
     <h2>Gegner (nach Threat sortiert)</h2>
     <div class="grid" id="enemies"></div>
   </div>
+
+  <!-- Immer sichtbar, ganz unten: Einstieg in die Match-History-Seite. -->
+  <div><a id="historyLink" href="history.html">&#128220; Match History Reports</a></div>
 
 <script>
 const PRIOS = ["low", "medium", "high", "urgent"];

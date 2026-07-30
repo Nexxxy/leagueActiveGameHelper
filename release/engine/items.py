@@ -70,13 +70,51 @@ SUPPORT_QUEST_IDS = {3865, 3866, 3867}
 CELESTIAL_OPPOSITION = "Celestial Opposition"
 
 
+# Summoner's-Rift-Filter (Scope des Projekts: Ranked/Normal Draft, SR 5v5).
+#
+# WARUM: Data Dragon fuehrt zu fast jedem Item MODUS-VARIANTEN mit eigener,
+# 6-stelliger ID (Praefix 22/32/44/66/77 + Basis-ID) und IDENTISCHEM
+# Anzeigenamen. In 16.15.1 sind das 439 von 868 Eintraegen. Weil `by_name()`
+# ueber den Namen indiziert, hat die zuletzt gelesene Variante den echten
+# SR-Eintrag ueberschrieben - mit falscher Beschreibung, falschem Preis und
+# falschem Rezept. Live verifiziert: 773100 "Lich Bane" (Jade-Modus, Passive
+# als <jadeUnique> statt <passive>) verdraengte 3100; damit fand
+# `passive_names()` fuer Lich Bane keine Passive mehr und `conflicts()` liess
+# Dusk and Dawn trotz Spellblade-Kollision durch.
+#
+# Zwei Kriterien, beide noetig:
+# 1. maps["11"] - schliesst ARAM-/Arena-/Swarm-/Jade-only-Items aus.
+# 2. ID < 100000 - die 6-stelligen Varianten-IDs. 43 von ihnen behaupten
+#    trotzdem maps["11"] (z.B. 323075 "Thornmail", 323003 "Archangel's Staff",
+#    667666 "The Collector"); ohne dieses zweite Kriterium wuerden sie die
+#    echten SR-Items weiterhin verdraengen - inklusive ihrer Varianten-Rezepte,
+#    die auf Komponenten-IDs zeigen, die es im Live-Inventar nie gibt.
+#    Riots echter Item-Katalog ist durchgaengig 4-stellig (in 16.15.1 gibt es
+#    keine einzige 5-stellige ID), die 6-stelligen sind reine Modus-Namensraeume.
+_SR_MAP = "11"
+_MODE_VARIANT_ID = 100000
+
+
+def _is_sr_item(item_id: str, item: dict) -> bool:
+    return (item_id.isdigit() and int(item_id) < _MODE_VARIANT_ID
+            and bool(item.get("maps", {}).get(_SR_MAP)))
+
+
 @lru_cache(maxsize=1)
-def _load() -> tuple[str, dict]:
+def _load_raw() -> tuple[str, dict]:
+    """UNGEFILTERTE Data-Dragon-Items (alle Modi). Nur fuer Auswertungen, die
+    bewusst ueber alle Varianten eines Namens scannen (grievous_names) - fuer
+    alles andere ist `_load()` die richtige Quelle."""
     cfg = Config.load()
     # Offline-tolerant: ohne Netz die neueste vollstaendig gecachte Version.
     version = ddragon.latest_version_cached(cfg.cache_dir)
-    data = ddragon.items(version, cfg.cache_dir)["data"]
-    return version, data
+    return version, ddragon.items(version, cfg.cache_dir)["data"]
+
+
+@lru_cache(maxsize=1)
+def _load() -> tuple[str, dict]:
+    version, data = _load_raw()
+    return version, {i: it for i, it in data.items() if _is_sr_item(i, it)}
 
 
 def version() -> str:
@@ -123,13 +161,19 @@ def grievous_names() -> frozenset:
     Wounds', wenden es aber laut Beschreibungstext an): Kriterium ist der
     Beschreibungstext, nicht der <passive>-Name.
 
-    Gescannt werden ALLE Item-Eintraege (nicht by_name()): Data Dragon fuehrt
-    denselben Namen mehrfach (SR-ID 6609 vs. Varianten-ID 226609), und nur EINE
-    Variante nennt 'Grievous Wounds' woertlich (die andere kuerzt zu '40%
-    Wounds'). Nennt IRGENDEINE Variante den Effekt woertlich, gilt der Name als
-    Grievous-Item - so faellt Chempunk Chainsword nicht durchs Raster."""
+    Gescannt werden ALLE Item-Eintraege (`_load_raw()`, nicht das SR-gefilterte
+    `_load()`/`by_name()`): Data Dragon fuehrt denselben Namen mehrfach (SR-ID
+    6609 vs. Varianten-ID 226609), und nur EINE Variante nennt 'Grievous Wounds'
+    woertlich (die andere kuerzt zu '40% Wounds'). Nennt IRGENDEINE Variante den
+    Effekt woertlich, gilt der Name als Grievous-Item - so faellt Chempunk
+    Chainsword nicht durchs Raster.
+
+    Genau darum haengt diese eine Funktion an den ungefilterten Daten: bei
+    Chempunk Chainsword (6609) UND Thornmail (3075) steht 'Grievous Wounds'
+    woertlich nur in der Nicht-SR-Variante. Ueber `_load()` wuerden beide aus
+    der Antiheal-Erkennung fallen."""
     return frozenset(
-        item["name"] for item in _load()[1].values()
+        item["name"] for item in _load_raw()[1].values()
         if "Grievous Wounds" in item.get("description", "")
     )
 
@@ -338,48 +382,6 @@ def _component_match(item: dict, inventory: Counter) -> tuple[int, list[str]]:
 
 def _component_discount(item: dict, inventory: Counter) -> int:
     return _component_match(item, inventory)[0]
-
-
-def _affordable_components(item: dict, inventory: Counter, gold: int,
-                           out: list) -> None:
-    """Sammelt rekursiv die jetzt kaufbaren Rezept-Teile Richtung `item`.
-
-    Regel je Rezept-Platz (analog `_component_match`): bereits im Inventar
-    vorhandene Teile decken den Platz ab (verbraucht, kein Kauf noetig). Ein
-    noch fehlendes Teil ist ein Kauf-Kandidat, wenn es <= `gold` kostet - dann
-    kauft man es GANZ. Ist es zu teuer, kommen rekursiv seine Unterkomponenten
-    in Frage. Sammelt (name, cost, item_id)-Tupel in `out`."""
-    for comp_id in item.get("from", []):
-        comp = by_id(int(comp_id))
-        if not comp:
-            continue
-        if inventory[comp_id] > 0:            # schon im Inventar -> Platz gedeckt
-            inventory[comp_id] -= 1
-            continue
-        cost = comp.get("gold", {}).get("total", 0)
-        if 0 < cost <= gold:
-            out.append((comp["name"], cost, comp_id))
-        else:                                 # zu teuer -> in die Unterkomponenten
-            _affordable_components(comp, inventory, gold, out)
-
-
-def best_affordable_component(item_name: str, owned_ids: list[int],
-                              gold: int) -> dict | None:
-    """Beste jetzt kaufbare Komponente des Ziel-Items: die teuerste Rezept-
-    Komponente, die (a) noch nicht im Inventar ist und (b) <= `gold` kostet.
-    Ist eine direkte Komponente selbst zu teuer, werden rekursiv deren
-    Unterkomponenten geprueft. Rueckgabe: {item, cost} oder None (nichts
-    Sinnvolles kaufbar / Item unbekannt)."""
-    entry = by_name().get(item_name)
-    if not entry:
-        return None
-    out: list = []
-    _affordable_components(entry[1], Counter(str(i) for i in owned_ids),
-                           gold, out)
-    if not out:
-        return None
-    name, cost, _cid = max(out, key=lambda t: t[1])
-    return {"item": name, "cost": cost}
 
 
 def _finished_targets(owned_ids: list[int]) -> set[str]:

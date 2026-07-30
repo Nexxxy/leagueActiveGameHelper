@@ -118,7 +118,7 @@ def phase_deltas(series: dict, pid: int, opp: int | None, role: str) -> list:
 
 # --- Kill-Kontext -----------------------------------------------------------
 
-def kill_context(kills: list, pid: int, team_pids: set, team_total_kills: int) -> dict:
+def kill_context(kills: list, pid: int, team_total_kills: int) -> dict:
     """Kills/Assists/Tode eines Spielers + Kill-Participation am Team.
 
     `team_total_kills` = Summe der Kills des eigenen Teams (aus Match-Stats);
@@ -290,7 +290,6 @@ TEAMFIGHT_MIN = 2               # ab so vielen entschiedenen Fights zaehlt die B
                                 # (Kipp-Punkt-Schwellen: TIP_* in Sektion 4)
 OBJECTIVE_DIFF_MIN = 2          # Elite-Differenz, ab der Objectives "praegend" sind
 TOWER_DIFF_MIN = 3              # Turm-Differenz, ab der Objectives "praegend" sind
-BUILD_LATE_GAP = 2.0            # Min hinter Gegenpart bei einem Kern-Item -> Befund
 BUILD_HIT_LOW = 0.34           # Engine-Konformitaet <= 34 % -> Build-Ausreisser
 VISION_DEFICIT_MIN = 8         # Ward-Aktionen-Rueckstand (Summe), ab dem markant
 
@@ -389,7 +388,7 @@ def _teamfight_balance(teamfights: list) -> tuple:
     return won, lost, len(decisive)
 
 
-def _defining_factor(teamfights: list, objectives: dict | None) -> str | None:
+def _defining_factor(objectives: dict | None) -> str | None:
     """Praegendster Faktor als kurze Nominalphrase - oder None.
 
     **Nutzer-Feedback 2026-07-26b (verbindliches Design-Prinzip): keine
@@ -436,12 +435,12 @@ def _defining_factor(teamfights: list, objectives: dict | None) -> str | None:
     return None
 
 
-def _verdict_outcome_line(win, outcome_known: bool, teamfights: list,
+def _verdict_outcome_line(win, outcome_known: bool,
                           objectives: dict | None) -> str | None:
     """Zeile 1: Spiel-Ausgang + praegendster Faktor - Letzterer nur, wenn er
     nicht-tautologisch ist (s. `_defining_factor`). Ohne bekanntes Endergebnis
     (Live-/Dump-Pfad) bleibt nur der Faktor."""
-    factor = _defining_factor(teamfights, objectives)
+    factor = _defining_factor(objectives)
     if outcome_known:
         res = "Sieg" if win else "Niederlage"
         return f"{res}. Prägendster Faktor: {factor}." if factor else f"{res}."
@@ -878,7 +877,7 @@ def _verdict_vision_line(me_player: dict) -> str | None:
             f"({_fmt_int(abs(total))} Ward-Aktionen weniger).")
 
 
-def verdict(me_player: dict, team: list, *, win=None, outcome_known: bool = True,
+def verdict(me_player: dict, *, win=None, outcome_known: bool = True,
             objectives: dict | None = None, teamfights: list | None = None,
             impact: dict | None = None, scoreboard: list | None = None,
             has_damage: bool = True, team_series: dict | None = None,
@@ -930,7 +929,7 @@ def verdict(me_player: dict, team: list, *, win=None, outcome_known: bool = True
     # Slot-Reservierung (s. VERDICT_MIN_PLAYER_LINES) - ohne sie schnitt der Cap
     # die Spieler-Befunde bei team-lastigen Spielen komplett weg.
     head = [
-        _verdict_outcome_line(win, outcome_known, teamfights, objectives),
+        _verdict_outcome_line(win, outcome_known, objectives),
         # Fight-Bilanz + Kipp-Punkt: die eine Zeile, die das Spiel einordnet.
         _verdict_teamfight_line(teamfights, team_series),
     ]
@@ -1753,8 +1752,6 @@ def oneside_minute(team_series: dict | None) -> dict | None:
 # haengen an Champion-Level und Patch und sind key-frei nicht verfuegbar; hier
 # wird nur die Groessenordnung nachgebildet, nicht der Timer selbst.
 TF_UNDERMANNED_BY_MIN = ((15.0, 30.0), (25.0, 45.0), (float("inf"), 60.0))
-
-TF_UNDERMANNED_S = TF_UNDERMANNED_BY_MIN[0][1]   # Basiswert der Staffel (Early)
 
 
 def _undermanned_window_s(minute: float) -> float:

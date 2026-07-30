@@ -90,9 +90,49 @@ def champions(version: str, cache_dir: Path) -> dict:
     return _fetch_cached("champion", version, cache_dir)
 
 
+# Summoner's-Rift-Filter der Champion-Statik (Scope: Ranked/Normal Draft, SR 5v5).
+#
+# WARUM: Wie bei den Items (siehe engine/items.py) fuehrt Data Dragon seit
+# 16.15.1 MODUS-VARIANTEN mit eigener ID und IDENTISCHEM Anzeigenamen - 60
+# 'Jade_*'-Eintraege, z.B. id='Jade_Ashe', key='60022', name='Ashe' neben dem
+# echten id='Ashe', key='22'. Weil `_name_lookup` ueber den Anzeigenamen
+# indiziert und die Variante in der Dict-Reihenfolge NACH dem Original kommt,
+# loeste `resolve_name('Ashe')` zu 'Jade_Ashe' auf; die Wissensbasis wird aber
+# unter der echten DD-ID gefuehrt -> `recommend()` fand fuer jeden Champion mit
+# Jade-Variante gar nichts mehr.
+#
+# Zwei Kriterien, beide noetig (Doppelabsicherung wie beim Item-Filter):
+# 1. '_' in der ID - echte Data-Dragon-Champion-IDs enthalten nie einen
+#    Unterstrich (darauf verlaesst sich auch profiling.verified_champion_id
+#    beim Token-Split von rawChampionName).
+# 2. key >= 10000 - echte Champion-Keys sind 1- bis 4-stellig, die Varianten
+#    haengen ein Modus-Praefix davor (60022 = 60 + 22).
+_MODE_VARIANT_KEY = 10000
+
+
+def _is_sr_champion(info: dict) -> bool:
+    try:
+        key = int(info.get("key", 0))
+    except (TypeError, ValueError):
+        # Nicht-numerischer key: kein bekanntes Varianten-Muster -> behalten,
+        # der '_'-Test entscheidet.
+        key = 0
+    return "_" not in str(info.get("id", "")) and key < _MODE_VARIANT_KEY
+
+
+def sr_champion_data(version: str, cache_dir: Path) -> dict:
+    """Champion-Statik OHNE Modus-Varianten (siehe Kommentar oben): dieselbe
+    Struktur wie `champions(...)["data"]`, aber nur echte SR-Champions.
+
+    Einzige Quelle fuer alle Lookups, die Varianten nicht sehen duerfen
+    (Namensaufloesung, Priors, Klassen-Buckets, Identitaets-Katalog)."""
+    data = champions(version, cache_dir)["data"]
+    return {cid: info for cid, info in data.items() if _is_sr_champion(info)}
+
+
 def champion_ids(version: str, cache_dir: Path, names: tuple) -> dict[int, str]:
     """Champion-Namen -> numerische IDs (fuer die Mastery-API)."""
-    data = champions(version, cache_dir)["data"]
+    data = sr_champion_data(version, cache_dir)
     return {int(info["key"]): info["id"] for info in data.values()
             if info["id"] in names or info["name"] in names}
 
@@ -103,8 +143,9 @@ def _simplify(name: str) -> str:
 
 @lru_cache(maxsize=4)
 def _name_lookup(version: str, cache_dir: Path) -> dict:
-    """Vereinfachter Name (id ODER Anzeigename) -> Data-Dragon-ID."""
-    data = champions(version, cache_dir)["data"]
+    """Vereinfachter Name (id ODER Anzeigename) -> Data-Dragon-ID. Ohne
+    Modus-Varianten - sonst ueberschreibt 'Jade_Ashe' den Namenseintrag 'ashe'."""
+    data = sr_champion_data(version, cache_dir)
     lookup = {}
     for info in data.values():
         lookup[_simplify(info["id"])] = info["id"]

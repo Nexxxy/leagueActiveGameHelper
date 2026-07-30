@@ -46,7 +46,7 @@ def damage_priors(version: str, cache_dir: Path) -> dict[str, float]:
     """Data-Dragon-ID -> ad_share (Anteil physischen Schadens) aus
     info.attack / (info.attack + info.magic). Sonderfall attack+magic == 0
     -> 0.5. Kuratierte Overrides haben Vorrang."""
-    data = ddragon.champions(version, cache_dir)["data"]
+    data = ddragon.sr_champion_data(version, cache_dir)
     priors: dict[str, float] = {}
     for info in data.values():
         cid = info["id"]
@@ -89,7 +89,7 @@ def class_buckets(version: str, cache_dir: Path) -> dict[str, str]:
 
     Gleiche Funktion fuer Pipeline (aggregate) und App (recommend-Fallback),
     damit Klassen-Aggregat und -Lookup exakt dieselbe Bucket-Definition nutzen."""
-    data = ddragon.champions(version, cache_dir)["data"]
+    data = ddragon.sr_champion_data(version, cache_dir)
     priors = damage_priors(version, cache_dir)
     buckets: dict[str, str] = {}
     for info in data.values():
@@ -121,12 +121,6 @@ def bucket_for_id(cid: str | None) -> str | None:
         return None
     version, cache_dir = _resolver_ctx()
     return class_buckets(version, cache_dir).get(cid)
-
-
-def bucket_for(champion_display_name: str) -> str | None:
-    """Live-Anzeigename ('Yorick') -> Klassen-Bucket ('ad_fighter') oder None,
-    wenn der Champion unbekannt ist oder keine Tags hat."""
-    return bucket_for_id(resolve_id(champion_display_name))
 
 
 @lru_cache(maxsize=1)
@@ -169,9 +163,3 @@ def cc_per_min_for_id(cid: str | None) -> float | None:
     engine.knowledge, um Modul-Importzyklen zu vermeiden."""
     from . import knowledge
     return knowledge.cc_prior_for_id(cid)
-
-
-def prior_for(champion_display_name: str) -> dict:
-    """Live-Anzeigename ('Bel'Veth') -> {'ad': x, 'ap': y} A-priori-Split.
-    Unbekannter Name -> neutrales {'ad': 0.5, 'ap': 0.5}."""
-    return prior_for_id(resolve_id(champion_display_name))

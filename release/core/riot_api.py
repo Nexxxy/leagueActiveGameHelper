@@ -207,10 +207,17 @@ class RiotClient:
 
     def match_ids(self, puuid: str, queue: int | None = None, count: int = 20,
                   start_time: int | None = None, *,
+                  end_time: int | None = None,
                   type_filter: str | None = "ranked"):
         """Match-IDs eines Spielers. `start_time` (Epoch-SEKUNDEN, optional)
         wird als startTime an die Match-v5-API durchgereicht - dann liefert
         Riot nativ nur Matches ab diesem Zeitpunkt (Patch-Grenze).
+
+        `end_time` (keyword-only, Epoch-SEKUNDEN, optional) ist das Gegenstueck
+        und wird als endTime durchgereicht. Zusammen mit `start_time` ergibt das
+        ein ZEITFENSTER - der History-Retry holt so nur die Spiele des fraglichen
+        Abends statt der letzten N Spiele ueber alle Queues (spart Quota und
+        findet auch mehrere Tage alte Reports).
 
         `queue` (optional): auf eine einzelne Queue-ID einschraenken; None ->
         kein Queue-Filter (alle Queues). `type_filter` (keyword-only, Default
@@ -226,6 +233,8 @@ class RiotClient:
             params["type"] = type_filter
         if start_time is not None:
             params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
         return self._get(
             self.routing_host,
             f"/lol/match/v5/matches/by-puuid/{puuid}/ids",

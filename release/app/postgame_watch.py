@@ -7,12 +7,18 @@ Spielende (Port 2999 liefert kein `allgamedata` mehr). Danach **zweistufig**:
 
   1. **Stufe 1 - sofort, key-frei:** der Report wird aus den In-Memory-Serien
      gerendert (kein Key, `me` = activePlayer, kein Warten auf Riot-Indexierung).
-  2. **Stufe 2 - asynchron, nur mit Key:** Match+Timeline nachladen (Roster-
-     Zuordnung, Retry/Backoff bis indexiert) und DIESELBE HTML-Datei um die
-     Schaden-Teile neu schreiben (Upgrade in place).
+  2. **Stufe 2 - asynchron, nur mit Key:** die echte Match-ID ueber den
+     Roster-Abgleich finden (Retry/Backoff bis indexiert) und DIESELBE HTML-Datei
+     durch den VOLLEN Match-V5-Report ersetzen (Upgrade in place).
 
-Das ersetzt den alten Key-Fetch-Trigger aus Phase 2 (Baseline +
-`resolve_match_after` -> `postgame.run`). **Gating NEU:** nur noch
+Stufe 2 merged seit 2026-07-30 nichts mehr, sondern baut den Report komplett neu
+(`postgame.build_report`): die Live-Client-API liefert einzelne Felder zeitweise
+falsch (real bei Viego: leere Item-Listen -> Item-Gold-Kurve fiel auf 0), Match-V5
+ist die verlaessliche Quelle. Der Datei-Stempel bleibt (`source_match_id`), damit
+Link und History-Zeile stabil sind.
+
+Das ersetzt den alten Key-Fetch-Trigger aus Phase 2 (Baseline-Polling per
+Key-Fetch -> `postgame.run`). **Gating NEU:** nur noch
 `postgame.auto_on_end` + nicht-Demo + SR-Spiel. Key/`me:` sind KEINE
 Voraussetzung mehr - ohne Key gibt es Stufe 1 trotzdem.
 
@@ -65,10 +71,31 @@ def _default_render_stage1(cfg, result, out_path, log) -> None:
     log(f"[postgame] Stufe 1 (key-frei) geschrieben: {path}")
 
 
+def _sync_trend_record(cfg, report, log) -> None:
+    """Trend-Record auf den Stand des gerade geschriebenen Reports bringen.
+
+    Stufe 1 hat den Record bereits angelegt (`run_from_capture`); jedes spaetere
+    In-place-Neuschreiben der HTML-Datei (Stufe-2-Upgrade, endgueltiges
+    Scheitern) muss ihn nachziehen, sonst behaelt der Trend/die Match-History den
+    veralteten Stand (win=None, has_damage=False, damage_status="pending").
+
+    `trend.write_record` ist idempotent und raeumt den stale Stempel-Record auf:
+    kennt der Report inzwischen die echte Match-ID (`enriched_match_id`), laeuft
+    der Record unter ihr und das alte `live_<...>.json` wird geloescht - so
+    zaehlt die Trend-Aggregation ein Spiel nie doppelt. Vollstaendig in
+    try/except (write_record schluckt zwar selbst, aber der Aufruf soll unter
+    keinen Umstaenden die Stufe-2-Kette brechen)."""
+    from app.postgame import trend
+    try:
+        trend.write_record(cfg, report, log=log)
+    except Exception as exc:   # noqa: BLE001 - Record darf nie den Report brechen
+        log(f"[postgame] Trend-Record nicht aktualisiert ({exc!r}).")
+
+
 def _default_write_failed(cfg, result, out_path, log) -> None:
     """Endgueltiges Scheitern von Stufe 2: DIESELBE Datei einmalig mit dem
     failed-Disclaimer neu schreiben (derselbe Mechanismus wie das Erfolgs-Upgrade,
-    nur mit `status_override="failed"` statt Schaden-Daten). Ohne Anreicherung
+    nur mit `status_override="failed"` statt Match-Daten). Ohne Online-Versuch
     (enrich_damage=False) - es wurde bereits erschoepfend versucht; hier geht es
     nur noch um den ehrlichen Hinweis inkl. manuellem Fallback-Befehl."""
     from app import postgame
@@ -76,39 +103,100 @@ def _default_write_failed(cfg, result, out_path, log) -> None:
     report = postgame.build_report_from_capture(cfg, result, enrich_damage=False,
                                                 status_override="failed", log=log)
     out_path.write_text(render.render_html(report), encoding="utf-8")
+    _sync_trend_record(cfg, report, log)
     log(f"[postgame] Stufe 2 endgueltig gescheitert - failed-Report "
         f"geschrieben: {out_path}")
 
 
+def _write_pending_progress(cfg, result, out_path, attempt, retries, is_retry,
+                            log) -> None:
+    """Zwischenstand nach einem Fehlversuch: DIESELBE Datei mit dem frisch
+    gebauten (key-freien) Capture-Report + echtem Versuchszaehler neu schreiben.
+
+    So zeigt der Status-Chip oben im Header "Versuch X/Y" statt eines statischen
+    "wird nachgeladen" - der Nutzer sieht, dass wirklich noch etwas laeuft.
+    Bewusst `build_report_from_capture` + `render.render_html` direkt statt
+    `run_from_capture`: letzteres wuerde bei jedem Zwischenschritt erneut einen
+    Trend-Record schreiben. `enrich_damage=False` haelt den Zwischenstand rein
+    lokal - der Online-Versuch laeuft in der Schleife selbst.
+
+    `damage_status` wird zusaetzlich hart auf "pending" gesetzt - in diesem
+    Codepfad ist immer ein Key aktiv (ohne Key laeuft Stufe 2 gar nicht), die
+    "no_key gewinnt"-Regel aus `build_report_from_capture` wird also nicht
+    verletzt. Vollstaendig in try/except: ein Bau-/Schreibfehler darf die
+    Retry-Schleife NIE abbrechen."""
+    from app import postgame
+    from app.postgame import render
+    try:
+        report = postgame.build_report_from_capture(
+            cfg, result, enrich_damage=False, status_override="pending", log=log)
+        report["damage_status"] = "pending"
+        report["enrich_progress"] = {"attempt": attempt, "retries": retries,
+                                     "is_retry": is_retry}
+        out_path.write_text(render.render_html(report), encoding="utf-8")
+    except Exception as exc:
+        log(f"[postgame] Stufe-2-Zwischenstand ({attempt}/{retries}) nicht "
+            f"schreibbar ({exc}) - Schleife laeuft weiter.")
+
+
 def _default_enrich_stage2(cfg, result, out_path, log,
                            retries: int | None = None,
-                           backoff: float | None = None) -> bool:
-    """Stufe 2: mit Retry/Backoff die Schaden-Anreicherung versuchen.
+                           backoff: float | None = None,
+                           is_retry: bool = False) -> bool:
+    """Stufe 2: mit Retry/Backoff den VOLLEN Match-V5-Report nachziehen.
 
-    Match-V5 braucht nach Spielende etwas, bis das Match indexiert ist. Solange
-    kein Roster-Treffer moeglich ist, liefert `build_report_from_capture` einen
-    key-freien Report (`enriched=False`) - dann warten und erneut versuchen. Bei
-    Erfolg wird DIESELBE Datei mit den Schaden-Teilen neu geschrieben; ist das
-    Budget erschoepft, bleibt der key-freie Stufe-1-Report unveraendert.
+    Je Versuch: die echte Match-ID ueber den Roster-Abgleich suchen
+    (`enrich.find_match_id`) und daraus den kompletten Timeline-Report bauen
+    (`postgame.build_report`) - der ersetzt den key-freien Stufe-1-Report in
+    DERSELBEN Datei. `source_match_id` haelt den Datei-Stempel fest (Link/
+    History-Zeile bleiben stabil), `enriched_match_id` traegt die echte ID, unter
+    der der Trend-Record laeuft (`trend.write_record` raeumt den stale
+    Stempel-Record dabei weg).
+
+    Match-V5 braucht nach Spielende etwas, bis das Match indexiert ist - und
+    zwischen "Match da" und "Timeline da" liegt nochmal ein Fenster (dann wirft
+    `build_report` SystemExit). BEIDES zaehlt nur als EIN gescheiterter Versuch:
+    Zwischenstand mit echtem Versuchszaehler schreiben, Backoff, weiter. Ist das
+    Budget erschoepft, bleibt der zuletzt geschriebene pending-Report stehen.
 
     Budget kommt aus der Config (`postgame.enrich_retries` /
     `enrich_backoff_seconds`); Tests injizieren `retries`/`backoff` direkt.
+    `is_retry` markiert den spaeten Zweitversuch (nur fuer die Anzeige).
     Rueckgabe: True bei erfolgreicher Aufwertung, sonst False (Budget
     erschoepft / kein Roster-Treffer)."""
     from app import postgame
-    from app.postgame import render
+    from app.postgame import enrich, render
     if retries is None:
         retries = cfg.postgame_enrich_retries
     if backoff is None:
         backoff = cfg.postgame_enrich_backoff_seconds
+    # Identitaet: config `me:` > activePlayer des Captures (im Live-Betrieb ist
+    # der activePlayer der Nutzer).
+    ident = (cfg.me or "").strip() or result.me_ident
     for attempt in range(1, retries + 1):
-        report = postgame.build_report_from_capture(cfg, result,
-                                                    enrich_damage=True, log=log)
-        if report.get("enriched"):
-            out_path.write_text(render.render_html(report), encoding="utf-8")
-            log(f"[postgame] Stufe 2: Report um Schaden aufgewertet -> {out_path}")
-            return True
+        try:
+            real_id = enrich.find_match_id(cfg, result.pid_map, ident, log=log)
+            if real_id:
+                report = postgame.build_report(cfg, real_id, me=ident, log=log)
+                # Datei-Stempel behalten (URL/History-Zeile bleiben stabil),
+                # Record trotzdem unter der echten ID fuehren.
+                report["source_match_id"] = out_path.stem
+                report["enriched_match_id"] = real_id
+                out_path.write_text(render.render_html(report), encoding="utf-8")
+                # Record nachziehen: erst jetzt sind Sieg/Niederlage, Schaden und
+                # die echte Match-ID bekannt (s. _sync_trend_record).
+                _sync_trend_record(cfg, report, log)
+                log(f"[postgame] Stufe 2: Report aus Match {real_id} vollstaendig "
+                    f"neu gebaut -> {out_path}")
+                return True
+        except (Exception, SystemExit) as exc:   # noqa: BLE001 - nie crashen
+            # Typischer Fall: Match indexiert, Timeline noch 404 (SystemExit aus
+            # build_report). Ein Fehlversuch, kein Abbruch der Stufe.
+            log(f"[postgame] Stufe-2-Versuch {attempt}/{retries} fehlgeschlagen "
+                f"({exc}) - wird erneut probiert.")
         if attempt < retries:
+            _write_pending_progress(cfg, result, out_path, attempt, retries,
+                                    is_retry, log)
             time.sleep(backoff)
     log("[postgame] Stufe 2: Match nicht rechtzeitig indexiert / kein "
         "Roster-Treffer - Report bleibt key-frei.")
@@ -146,7 +234,7 @@ class PostgameWatcher:
         # (der Poll-/Stufe-2-Thread schreibt, der Frontend-Handler liest).
         # None = noch kein Report; sonst {"path": Path, "written_at": iso-str,
         # "enriched": bool}. `enriched` flippt auf True, sobald Stufe 2 die Datei
-        # um die Schaden-Analyse aufgewertet hat.
+        # durch den vollen Match-V5-Report ersetzt hat.
         self._report_lock = threading.Lock()
         self._last_report = None
 
@@ -261,22 +349,24 @@ class PostgameWatcher:
                       "(keine Stufe 2).")
 
     def _run_stage2(self, result, out_path, *, is_retry: bool = False) -> None:
-        """Stufe 2 gekapselt: Schaden-Anreicherung darf den Server nie crashen.
+        """Stufe 2 gekapselt: das Report-Upgrade darf den Server nie crashen.
 
         Gibt Stufe 2 auf (Budget erschoepft / kein Roster-Treffer) und ist dies
         der ERSTE Anlauf, wird EIN verzoegerter Zweitversuch eingeplant (Riot
         indexiert manche Matches schlicht spaeter). Der Zweitversuch (`is_retry`)
         gibt bei erneutem Fehlschlag endgueltig auf - keine Endlosschleife."""
         try:
+            # `is_retry` als Keyword durchgereicht - der Seam muss es annehmen
+            # (Default-Impl. und Test-Fakes tun das ueber **kw).
             enriched = bool(self._enrich_stage2(self.cfg, result, out_path,
-                                                self._log))
+                                                self._log, is_retry=is_retry))
         except (Exception, SystemExit) as exc:
-            self._log(f"[postgame] Stufe-2-Anreicherung fehlgeschlagen ({exc}) - "
+            self._log(f"[postgame] Stufe-2-Upgrade fehlgeschlagen ({exc}) - "
                       f"Report bleibt key-frei.")
             enriched = False
         if enriched:
-            # Datei wurde in place um die Schaden-Analyse aufgewertet -> Report-
-            # Zustand nachziehen, damit der Frontend-Button die Badge zeigt.
+            # Datei wurde in place durch den vollen Match-Report ersetzt ->
+            # Report-Zustand nachziehen, damit der Frontend-Button die Badge zeigt.
             self._set_report(out_path, enriched=True)
             return
         if is_retry:
@@ -289,7 +379,7 @@ class PostgameWatcher:
             except (Exception, SystemExit) as exc:
                 self._log(f"[postgame] failed-Report schreiben fehlgeschlagen "
                           f"({exc}) - Report bleibt unveraendert.")
-            self._log("[postgame] Schaden-Aufwertung nicht moeglich - manuell: "
+            self._log("[postgame] Report-Aufwertung nicht moeglich - manuell: "
                       "uv run python -m pipeline postgame --latest")
             return
         # Erster Anlauf gescheitert -> genau EINEN spaeten Zweitversuch planen.

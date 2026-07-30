@@ -16,14 +16,18 @@ def _canonical_ids() -> dict:
     """Vereinfachte Champion-ID -> kanonische Data-Dragon-ID. Faengt das
     Riot-interne Casing ab ('FiddleSticks' in Live/Match-V5 vs. 'Fiddlesticks'
     in Data Dragon) - an der Wurzel, damit alle exakt vergleichenden Lookups
-    (recommend._HEALING_THREATS, champions.prior_for_id/bucket_for_id) treffen."""
+    (recommend._HEALING_THREATS, champions.prior_for_id/bucket_for_id) treffen.
+
+    Ohne Modus-Varianten (ddragon.sr_champion_data): 'Jade_Ashe' & Co. haben
+    denselben Anzeigenamen wie das Original und haetten hier eine zweite,
+    KB-lose ID in den Katalog gebracht."""
     from core import ddragon
     from core.config import Config
     from core.ddragon import _simplify
     cache_dir = Config.load().cache_dir
     # Offline-tolerant: ohne Netz die neueste vollstaendig gecachte Version.
     version = ddragon.latest_version_cached(cache_dir)
-    data = ddragon.champions(version, cache_dir)["data"]
+    data = ddragon.sr_champion_data(version, cache_dir)
     return {_simplify(info["id"]): info["id"] for info in data.values()}
 
 

@@ -2,16 +2,22 @@
 sonst RiotClient mit Retry/Backoff), Identitaets-Aufloesung (me:) und die
 Item-ID->Name-Abbildung.
 
-Cache-Layout wie der Rest der Pipeline: `data/pipeline/matches/<patch>/<id>.json`
-und `timelines/<patch>/<id>.json`. Da der Report mit EINER Match-ID aufgerufen
-wird und der Patch vorab nicht bekannt ist, wird zuerst der Cache patch-uebergreifend
-durchsucht; erst wenn dort nichts liegt, geht ein API-Call raus.
+Cache-Layout wie der Rest der Pipeline: der JSONL-Shard-Store
+(`core/shardstore.py`, `data/pipeline/store/matches/<patch>/<platform>.jsonl`
+und `store/timelines/...`). Da der Report mit EINER Match-ID aufgerufen wird und
+der Patch vorab nicht bekannt ist, wird zuerst der Cache patch-uebergreifend
+durchsucht (neuester Patch zuerst); erst wenn dort nichts liegt, geht ein
+API-Call raus. Die Store-Instanzen kommen aus `shardstore.shared`: die
+Match-History fragt je Spiel einzeln an, eine neue Instanz je Abfrage wuerde den
+Shard jedes Mal komplett neu scannen. Einzel-Puts oeffnen den Shard nur kurz
+(open-append-close), damit ein parallel laufender Pipeline-Crawl nicht gestoert
+wird.
 """
 
 import time
 
-from core import ddragon
-from core.cacheio import read_json, write_json
+from core import ddragon, shardstore
+from core.cacheio import read_json
 from core.config import Config
 from core.riot_api import RiotClient
 
@@ -44,19 +50,24 @@ def routing_of(match_id: str) -> str:
 
 
 def _find_cached(cfg: Config, kind: str, match_id: str):
-    """Sucht `<kind>/<patch>/<id>.json` patch-uebergreifend im Cache.
+    """Sucht den Record patch-uebergreifend im Shard-Store, neuester Patch zuerst.
     Rueckgabe (patch, data) oder (None, None). Skip-Marker gelten als 'nicht da'."""
-    base = cfg.cache_dir / kind
-    if not base.exists():
-        return None, None
-    for patch_dir in sorted(base.iterdir(), reverse=True):
-        path = patch_dir / f"{match_id}.json"
-        if path.exists():
-            data = read_json(path)
-            if isinstance(data, dict) and "skip" in data:
-                continue
-            return patch_dir.name, data
+    for patch in sorted(shardstore.patches(cfg, kind), reverse=True):
+        data = shardstore.shared(cfg, kind, patch).get(match_id)
+        if data is None:
+            continue
+        if isinstance(data, dict) and "skip" in data:
+            continue
+        return patch, data
     return None, None
+
+
+def _cache(cfg: Config, kind: str, patch: str, match_id: str, data) -> None:
+    """Einzel-Put in den Shard-Store (Postgame schreibt genau einen Record).
+
+    Ueber dieselbe geteilte Instanz wie `_find_cached`, damit der frisch
+    geschriebene Record ohne erneuten Scan sofort wieder gefunden wird."""
+    shardstore.shared(cfg, kind, patch).put(match_id, data)
 
 
 def _make_client(cfg: Config, keys, platform: str, routing: str) -> RiotClient:
@@ -189,7 +200,7 @@ def load_match_and_timeline(cfg: Config, match_id: str, *, retries: int = 0,
         if match is None:
             raise SystemExit(f"Match {match_id} nicht abrufbar (404/Timeout).")
         patch = ddragon.patch_of(match["info"].get("gameVersion", ""))
-        write_json(cfg.cache_dir / "matches" / patch / f"{match_id}.json", match)
+        _cache(cfg, "matches", patch, match_id, match)
 
     if timeline is None:
         if client is None:
@@ -199,8 +210,7 @@ def load_match_and_timeline(cfg: Config, match_id: str, *, retries: int = 0,
                                      retries, backoff, log)
         if timeline is None:
             raise SystemExit(f"Timeline zu {match_id} nicht abrufbar.")
-        write_json(cfg.cache_dir / "timelines" / patch / f"{match_id}.json",
-                   timeline)
+        _cache(cfg, "timelines", patch, match_id, timeline)
 
     return patch, match, timeline
 
@@ -238,7 +248,7 @@ def _queue_id_of(cfg: Config, client: RiotClient, match_id: str, log=print):
         log(f"[postgame] Match {match_id} nicht abrufbar - uebersprungen.")
         return None
     patch = ddragon.patch_of(match["info"].get("gameVersion", ""))
-    write_json(cfg.cache_dir / "matches" / patch / f"{match_id}.json", match)
+    _cache(cfg, "matches", patch, match_id, match)
     return match["info"].get("queueId")
 
 
@@ -282,35 +292,6 @@ def resolve_latest_match_id(cfg: Config, *, me: str | None = None,
     raise SystemExit(
         f"[postgame] Keins der letzten {len(ids)} Spiele ist Summoner's Rift "
         f"5v5 - nur SR wird ausgewertet (ARAM u. a. werden uebersprungen).")
-
-
-def resolve_match_after(cfg: Config, baseline: str | None, *, me: str | None = None,
-                        lookback: int = 5, retries: int = 8, backoff: float = 10.0,
-                        log=print) -> str | None:
-    """Neue SR-5v5-Match-ID nach Spielende aufloesen (fuer den Auto-Trigger).
-
-    Match-V5 indexiert ein Match erst Sekunden bis Minuten nach Spielende. Damit
-    der Auto-Report das GERADE beendete Spiel trifft (und nicht das vorige), wird
-    `resolve_latest_match_id` mit Retry/Backoff (dieselbe `_fetch_with_retry`-
-    Mechanik wie beim Match-/Timeline-Fetch) so lange gepollt, bis die neueste ID
-    != `baseline` ist (= das neue Spiel ist indexiert). `baseline` ist die vor
-    Spielbeginn gemerkte neueste ID; ist sie None (Baseline-Aufloesung schlug
-    fehl), gilt die erste erfolgreich aufgeloeste ID.
-
-    Rueckgabe die neue ID oder None, wenn das Retry-Budget erschoepft ist (dann
-    sauber aufgeben - der Aufrufer loggt und bricht ab)."""
-    def _call():
-        try:
-            mid = resolve_latest_match_id(cfg, me=me, lookback=lookback, log=log)
-        except SystemExit as exc:
-            # Noch kein (SR-)Match abrufbar -> wie 'nicht verfuegbar' behandeln.
-            log(f"[postgame] {exc}")
-            return None
-        if baseline is not None and mid == baseline:
-            return None   # noch das alte Spiel -> weiter warten
-        return mid
-
-    return _fetch_with_retry(_call, retries, backoff, log)
 
 
 # --- Identitaet (me:) -------------------------------------------------------

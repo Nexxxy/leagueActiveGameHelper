@@ -26,6 +26,6 @@ Wichtig: Der Server muss VOR Spielbeginn laufen. Wird er erst spaeter (ab ~Minut
 2) gestartet, fehlt die volle Statistik.
 
 Optional: Traegst du in `config.yml` einen eigenen Riot-API-Key (`riot.api_key`)
-plus deine Riot-ID (`me: Name#Tag`) ein, wird der Report nach dem Spiel
+plus deine Riot-ID (`app.me: Name#Tag`) ein, wird der Report nach dem Spiel
 automatisch um Schaden-Diagramme und einen Impact-Score aufgewertet. Ohne Key
 ist er voll nutzbar; ein Disclaimer erklaert dann die fehlenden Schaden-Teile.
