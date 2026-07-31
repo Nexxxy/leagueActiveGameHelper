@@ -5,7 +5,7 @@ BOTTOM-Partner: ein AD-Carry und ein AP-Carry verlangen unterschiedliche
 Ally-Buff-Items. Empirisch (Patch 16.13+16.14, Diamond-Index) kippt die
 Pickrate der reinen Ally-Buff-Items rein am Schadenstyp des Partners:
 Ardent Censer 7,3 % (AD-Partner) -> 1,4 % (AP-Partner), Staff of Flowing
-Water 1,1 % -> 4,6 %. Details in docu/research_bot_sup_mates.md (Abschnitt 9.40).
+Water 1,1 % -> 4,6 %. Details in docu/research/research_bot_sup_mates.md (Abschnitt 9.40).
 
 Dieses Modul liefert nur die Klassifikation; der Empfehlungs-Layer, der sie
 auswertet, folgt in einer spaeteren Tranche (T4).

@@ -1,7 +1,7 @@
 """Post-Game-Report (Phase 1): aus EINER Match-ID einen HTML-Report bauen.
 
 Massstab ist die tatsaechlich gespielte Lobby, nicht High-Elo (s.
-docu/plan_postgame.md). Der Ablauf: Match + Timeline laden (Cache-first) ->
+docu/archive/plans/plan_postgame.md). Der Ablauf: Match + Timeline laden (Cache-first) ->
 Serien-Builder (Timeline -> Minuten-Serien + Events) -> Gegenpart-Delta-Engine
 je Team-Spieler -> Lobby-Ranking + Item-Sanity + Narrativ -> self-contained
 HTML nach `postgame/<matchId>.html`.

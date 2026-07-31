@@ -167,6 +167,62 @@ def next_after(champion: str, role: str | None = None) -> dict:
     return entry.get("next_after") or {}
 
 
+def slot_dist(champion: str, role: str | None = None) -> dict[str, dict[int, float]]:
+    """Item-Name -> {Kaufslot: Anteil} (Pipeline V2-04, `slot_dist`) fuer alle
+    Items des Champion+Rollen-Eintrags (core UND situational).
+
+    Leeres Dict fuer KBs vor V2-04; Items ohne belastbare Slot-Verteilung fehlen
+    einzeln. Slot-Keys werden defensiv nach int gezogen (ein handgeschriebener
+    Override koennte sie als String liefern), unbrauchbare Eintraege fallen
+    still weg - die Leseseite soll an einer kaputten Zelle nicht sterben."""
+    _role, entry = for_champion(champion, role)
+    out: dict[str, dict[int, float]] = {}
+    for item in list(entry.get("core") or []) + list(entry.get("situational") or []):
+        dist = item.get("slot_dist") if isinstance(item, dict) else None
+        if not isinstance(dist, dict):
+            continue
+        clean = {}
+        for slot, share in dist.items():
+            try:
+                clean[int(slot)] = float(share)
+            except (TypeError, ValueError):
+                continue
+        if clean:
+            out[item["item"]] = clean
+    return out
+
+
+def exclusive_pairs(champion: str, role: str | None = None) -> list[frozenset]:
+    """Gelernte Exklusiv-Paare des Champion+Rollen-Eintrags (Pipeline V2-04) als
+    Liste von frozensets mit zwei Item-Namen - Ergaenzung zu `items.conflicts`.
+
+    Leere Liste fuer KBs vor V2-04. Eintraege, die kein Zweier-Paar sind, werden
+    ausgelassen (statt eine Exception zu werfen)."""
+    _role, entry = for_champion(champion, role)
+    out: list[frozenset] = []
+    for pair in entry.get("exclusive") or []:
+        names = [str(x) for x in pair] if isinstance(pair, (list, tuple)) else []
+        if len(names) == 2:
+            out.append(frozenset(names))
+    return out
+
+
+def boots_cells(champion: str, role: str | None = None) -> dict:
+    """Konditionale Boots-Zellen des Champion+Rollen-Eintrags (Pipeline V2-02):
+
+        {"by_threat": {ad|ap: {games, base_win_rate, items}},
+         "by_cc":     {cc_heavy|cc_light: {...}},
+         "by_state":  {ahead|behind: {purchases, base_win_rate, items}}}
+
+    Jeder Block fehlt einzeln, wenn die Datenlage ihn nicht hergibt - und ALLE
+    fehlen in KBs, die vor V2-02 gebaut wurden. Die Leseseite bekommt dann leere
+    Dicts und faellt auf die unkonditionierte Boots-Liste zurueck."""
+    _role, entry = for_champion(champion, role)
+    return {"by_threat": entry.get("boots_by_threat") or {},
+            "by_cc": entry.get("boots_by_cc") or {},
+            "by_state": entry.get("boots_by_state") or {}}
+
+
 def for_class(bucket: str | None, role: str | None) -> dict:
     """Liefert den Klassen-Eintrag (Bucket + Rolle) aus der `classes:`-Sektion
     der builds.yaml - Fallback fuer duenne Champion-Kombis. Leeres Dict, wenn
@@ -174,3 +230,13 @@ def for_class(bucket: str | None, role: str | None) -> dict:
     if not bucket or not role:
         return {}
     return load().get("classes", {}).get(bucket, {}).get(role, {})
+
+
+def class_by_state(bucket: str | None, role: str | None) -> dict:
+    """Gold-konditionierter Klassen-Block (Pipeline V2-07):
+    `{ahead|behind: {purchases, base_win_rate, items}}`.
+
+    Zweite Quelle der Behind-Auswahl, wenn die Champion-eigene Zelle zu duenn
+    ist. Leeres Dict fuer unbekannte Buckets UND fuer KBs vor V2-07 - der
+    Aufrufer faellt dann auf die naechste Stufe (defensiv getaggte Items)."""
+    return for_class(bucket, role).get("by_state") or {}

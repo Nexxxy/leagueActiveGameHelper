@@ -18,8 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.config import ROOT, VALID_ROLES, Config
-from engine import (items, knowledge, manifest, profiling, rec_partner,
-                    recommend)
+from engine import (items, knowledge, manifest, profiling, rec_deaths,
+                    rec_partner, recommend)
 from . import assets, demo, history, live_client
 
 app = FastAPI(title="League Active Game Helper")
@@ -336,6 +336,15 @@ def _build_state() -> dict:
         partner_class = rec_partner.classify_partner(
             bottom_ally_profile["champion_id"], bottom_ally_profile)
         bot_partner = {**bottom_ally_profile, "partner_class": partner_class}
+    # Todes-Signal aus dem Kill-Feed (V2-08): `allgamedata` traegt den
+    # kumulativen Event-Strom bereits mit (`events.Events[]`, gleiche Daten wie
+    # /liveclientdata/eventdata) - es wird also NICHT zusaetzlich gepollt. Die
+    # Killer-Namen im Feed sind Spielernamen; die Zuordnung auf Champions
+    # liefern die ohnehin vorhandenen Identitaets-Pins. Ohne Events (alte
+    # Zustaende, Demo) bleibt das Signal None -> Layer stumm.
+    killers = {(p.get("riotIdGameName") or p.get("summonerName")): pin
+               for p, pin in resolved}
+    death_signal = rec_deaths.signal_from_state(data, active_name, killers)
     reco = recommend.recommend(
         my_pin["name"], role_hint, owned,
         my_profile["scores"], enemies,
@@ -347,6 +356,7 @@ def _build_state() -> dict:
         champion_id=my_profile["champion_id"],
         ally_gold_spent=ally_gold_spent,
         bot_partner=bot_partner,
+        death_signal=death_signal,
     )
     _add_item_ids(reco)
 

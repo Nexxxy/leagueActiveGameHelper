@@ -412,11 +412,23 @@ def _build_eval_html(p: dict) -> str:
             f'<div class="be-timing">{timing_html}</div></div>')
 
 
+def _purchase_grade(pu: dict) -> str:
+    """Stufe eines Kaufs (V2-06), abwaertskompatibel: aeltere persistierte
+    Reports haben nur `hit` - dort gibt es die Stufe "vertretbar" nicht, und
+    hit/miss ist genau die alte Zweistufen-Semantik."""
+    grade = pu.get("grade")
+    if grade in ("hit", "ok", "miss"):
+        return grade
+    return "hit" if pu.get("hit") else "miss"
+
+
 def _build_replay_html(p: dict) -> str:
-    """Build-Eval Stufe 3: Engine-Replay (Phase 5, §8b). Zeigt 'X/Y Käufe
-    engine-konform' (regulaere Fertig-Items) + optional die Boots-Teilmenge und
-    die Abweichungen mit der Engine-Alternative. `build_replay` None (fehlender
-    Static-Cache/builds.yaml) -> leer; 'nicht bewertbar', wenn kein KB-Wissen."""
+    """Build-Eval Stufe 3: Engine-Replay (Phase 5, §8b). Zeigt die drei Stufen
+    des Engine-Checks getrennt ('2 konform · 1 vertretbar · 1 Abweichung von 4
+    Käufen', V2-06) + optional die Boots-Teilmenge, darunter je nicht-konformem
+    Kauf entweder der statistische Rückhalt (vertretbar) oder die Engine-
+    Alternative (Abweichung). `build_replay` None (fehlender Static-Cache/
+    builds.yaml) -> leer; 'nicht bewertbar', wenn kein KB-Wissen."""
     br = p.get("build_replay")
     if not br:
         return ""
@@ -426,25 +438,41 @@ def _build_replay_html(p: dict) -> str:
     score = br.get("score") or {}
     boots = br.get("boots") or {}
     total, hits = score.get("total", 0), score.get("hits", 0)
+    # `ok` fehlt in Reports vor V2-06 -> 0, dann liest sich die Zeile wie frueher
+    # (konform + Abweichung, keine dritte Stufe).
+    oks = score.get("ok", 0)
+    miss = max(0, total - hits - oks)
     if total == 0 and boots.get("total", 0) == 0:
         return ('<div class="br"><span class="be-h">Engine-Check</span> '
                 '<span class="muted">keine bewertbaren Käufe</span></div>')
+    # Farbe wie bisher an der KONFORMITAET (hits), aber "alles daneben" ist erst
+    # rot, wenn auch kein Kauf vertretbar war.
     scls = ("tag-strength" if total and hits == total
-            else "tag-weak" if total and hits == 0 else "")
+            else "tag-weak" if total and hits == 0 and oks == 0 else "")
+    parts = [f"{hits} konform"]
+    if oks:
+        parts.append(f"{oks} vertretbar")
+    if miss:
+        parts.append(f"{miss} Abweichung")
     head = (f'<span class="be-h">Engine-Check</span> '
-            f'<span class="{scls}">{hits}/{total} Käufe engine-konform</span>')
+            f'<span class="{scls}">{" · ".join(parts)} von {total} Käufen</span>')
     if boots.get("total", 0):
         head += (f' <span class="muted">· Boots {boots.get("hits", 0)}/'
                  f'{boots.get("total", 0)}</span>')
-    devs = [pu for pu in br.get("purchases", []) if not pu.get("hit")]
-    dev_html = ""
-    if devs:
-        rows = []
-        for pu in devs:
+    rows = []
+    for pu in br.get("purchases", []):
+        grade = _purchase_grade(pu)
+        if grade == "hit":
+            continue
+        if grade == "ok":
+            reason = pu.get("ok_reason") or "statistisch gestützt"
+            note = f'→ vertretbar: {_esc(reason)}'
+        else:
             top = " / ".join(_esc(t) for t in (pu.get("engine_top") or [])) or "–"
-            rows.append(f'<li>Min {pu["minute"]}: {_esc(pu["item"])} '
-                        f'<span class="muted">→ Engine: {top}</span></li>')
-        dev_html = f'<ul class="br-dev">{"".join(rows)}</ul>'
+            note = f'→ Engine: {top}'
+        rows.append(f'<li>Min {pu["minute"]}: {_esc(pu["item"])} '
+                    f'<span class="muted">{note}</span></li>')
+    dev_html = f'<ul class="br-dev">{"".join(rows)}</ul>' if rows else ""
     return f'<div class="br">{head}{dev_html}</div>'
 
 

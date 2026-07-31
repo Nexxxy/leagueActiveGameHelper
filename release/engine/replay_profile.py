@@ -36,13 +36,29 @@ def enemy_profile(pid: int, inv: dict, kda: dict, cs: dict, level: dict,
     return prof
 
 
-def replay_candidates(result: dict) -> list[str]:
-    """Deterministische Kandidatenliste: [next] + result['items'], dedupliziert."""
+def replay_candidates(result: dict, *, exclude_boots: bool = False) -> list[str]:
+    """Deterministische Kandidatenliste: [next] + result['items'], dedupliziert.
+
+    `exclude_boots=True` laesst ALLE Boots-Empfehlungen weg (`kind == "boots"`,
+    sowohl `next` als auch Eintraege in `items`).
+
+    WARUM (Befund 1, plan_engine_v2.md §1): die Engine liefert Boots und
+    regulaere Items in EINER Liste. Wird ein regulaerer Fertig-Kauf gegen die
+    Top-3 dieser Liste gemessen, belegen Boots-Vorschlaege regelmaessig zwei der
+    drei Slots (`next` = Boots + ein zweiter Boots-Eintrag) - echte Core-Items
+    fallen hinten raus und der Kauf zaehlt als Abweichung, obwohl er KB-konform
+    ist (real: Jhin 0/4 bei Top-3 "Steelcaps / Collector / Swiftness"). Boots
+    haben in beiden Aufrufern (`app/postgame/build_replay.py`,
+    `pipeline/backtest.py`) ihre EIGENE Bewertung gegen die Boots-Teilmenge der
+    Engine; sie duerfen die Item-Top-3 deshalb nicht mitbelegen.
+    """
     out: list[str] = []
     nxt = result.get("next")
-    if nxt and nxt.get("item"):
+    if nxt and nxt.get("item") and not (exclude_boots and nxt.get("kind") == "boots"):
         out.append(nxt["item"])
     for it in result.get("items", []):
+        if exclude_boots and it.get("kind") == "boots":
+            continue
         name = it.get("item")
         if name and name not in out:
             out.append(name)

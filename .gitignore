@@ -1,6 +1,7 @@
 release/.venv/
 release/server.pid
 release/server.port
+release/server.log
 release/smoketest.log
 release/currentGameInfo.yaml
 release/postgame/

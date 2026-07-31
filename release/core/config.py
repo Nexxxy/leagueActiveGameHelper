@@ -133,6 +133,9 @@ class Config:
     dev_api_key: str = ""
     round_robin: bool = False
     regions: tuple = ()   # tuple[tuple[str, str], ...] — (platform, routing)-Paare
+    reworks: dict = field(default_factory=dict)  # ddragon-ID -> erster Patch mit
+                                    # neuem Kit; sperrt die Vererbung aelterer
+                                    # (Prae-Rework-)Daten, s. pipeline/inherit.py
 
     @property
     def api_keys(self) -> tuple[str, ...]:
@@ -240,6 +243,16 @@ class Config:
                     cfg.seed_ttl_hours = max(0, int(pipeline["seed_ttl_hours"]))
                 except (TypeError, ValueError):
                     pass  # unbrauchbarer Wert -> Default (24 h) behalten
+            # Rework-Gate: {ddragon-ID: erster Patch mit neuem Kit}. Sperrt in
+            # pipeline/inherit.py die Vererbung von Daten AELTERER Patches -
+            # ein reworkter Champion hat mit seinen Prae-Rework-Zahlen nichts
+            # mehr gemein. Tolerant geparst: unbrauchbarer Block -> leeres Gate
+            # (die Vererbung laeuft dann wie vorher, nichts bricht).
+            try:
+                cfg.reworks = {str(k): str(v)
+                               for k, v in (pipeline.get("reworks") or {}).items()}
+            except (AttributeError, TypeError, ValueError):
+                pass  # kein dict -> Default (kein Gate) behalten
             # Eigene Identitaet fuer den Post-Game-Report (wer bin "ich" im
             # Match). Kanonisch `app.me:` (Riot-ID 'Name#Tag' oder PUUID);
             # Top-Level `me:` bleibt als Fallback fuer Alt-/Release-Configs

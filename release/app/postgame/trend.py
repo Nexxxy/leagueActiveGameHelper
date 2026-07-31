@@ -1,5 +1,5 @@
 """Trend-Aggregation ueber N Games (Post-Game-Report Phase 6, s.
-docu/plan_postgame.md §6 Phase 6 + §2.5).
+docu/archive/plans/plan_postgame.md §6 Phase 6 + §2.5).
 
 Grundidee (§2.5): Ein Einzelspiel ist verrauscht (der Gegenpart kann Smurf/Int
 sein) und dient als Story. Der **Trend ueber N Games** ist die eigentliche,
@@ -124,7 +124,14 @@ def _impact_quote(report: dict) -> float | None:
 
 def _build_summary(me_card: dict) -> dict:
     """Build-Eval-Kompakt: mittlerer Timing-Gap (min hinter Gegenpart) +
-    Engine-Score (hits/total). Fehlende Teile -> None."""
+    Engine-Score. Fehlende Teile -> None.
+
+    `engine_hits`/`engine_total` behalten ihre Semantik aus der Zweistufen-Zeit:
+    hits = KONFORME Kaeufe (Top-3), total = alle bewerteten Item-Kaeufe - so
+    bleiben alte Records mit neuen vergleichbar. `engine_ok` (V2-06) kommt als
+    drittes Feld dazu: die vertretbaren Kaeufe (statistischer Rueckhalt, aber
+    nicht Top-3). Records aus der Zeit vor V2-06 haben das Feld nicht; jede
+    Leseseite muss es darum mit `.get()` behandeln (Default None/0)."""
     be = me_card.get("build_eval") or {}
     gaps = [(t.get("mine") - t.get("opp")) for t in (be.get("timing") or [])
             if t.get("opp") is not None and t.get("mine") is not None]
@@ -133,7 +140,11 @@ def _build_summary(me_card: dict) -> dict:
     score = replay.get("score") if replay.get("evaluable") else None
     hits = score.get("hits") if score else None
     total = score.get("total") if score else None
-    return {"timing_gap_min": gap, "engine_hits": hits, "engine_total": total}
+    # Ein Report-Modell aus der Zeit vor V2-06 (persistiert/neu gerendert) hat
+    # kein `ok` im Score -> None statt einer erfundenen 0.
+    oks = score.get("ok") if score else None
+    return {"timing_gap_min": gap, "engine_hits": hits, "engine_ok": oks,
+            "engine_total": total}
 
 
 def extract_record(report: dict) -> dict:

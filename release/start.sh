@@ -38,11 +38,12 @@ uv run python -u -m app.server "$@" > server.log 2>&1 &
 BASH_PID=$!
 echo "$PORT" > server.port
 
-# Auf die Port-Bindung warten (bis ~6s). Die Bash-Job-PID ($!) ist unter Git
-# Bash oft nicht die des Python-Prozesses - die echte PID holen wir ueber den
-# Port, sobald er lauscht.
+# Auf die Port-Bindung warten (bis ~30s - langsame PCs brauchen fuer den
+# ersten Start deutlich laenger als ein paar Sekunden). Die Bash-Job-PID ($!)
+# ist unter Git Bash oft nicht die des Python-Prozesses - die echte PID holen
+# wir ueber den Port, sobald er lauscht.
 REAL_PID=""
-for _ in $(seq 1 30); do
+for _ in $(seq 1 150); do
     REAL_PID="$(pids_on_port "$PORT" | head -n1)"
     [ -n "$REAL_PID" ] && break
     grep -qE "Errno|Traceback" server.log 2>/dev/null && break

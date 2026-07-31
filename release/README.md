@@ -11,6 +11,13 @@ Item-Empfehlungen fuer das laufende Spiel, mit vortrainierter Wissensbasis.
 ./start.sh --demo   # Demo-Modus ohne laufendes Spiel
 ./kill.sh           # Server stoppen
 ```
+
+## Starten (PowerShell)
+```powershell
+.\start.ps1          # echtes Spiel (liest die LoL Live Client Data API)
+.\start.ps1 --demo   # Demo-Modus ohne laufendes Spiel
+.\kill.ps1           # Server stoppen
+```
 Dann im Browser: http://127.0.0.1:8000
 
 Beim ersten Start legt uv automatisch das venv an und die App laedt die

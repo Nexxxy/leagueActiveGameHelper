@@ -79,6 +79,75 @@ class Weights:
     # klein (Pool-Hit@3 +0,18 pp) - halber statt voller Lift ist genau deshalb
     # die ehrliche Einstellung: das Signal darf mitreden, nicht dominieren.
     next_after_factor: float = 0.5
+    # --- Boots-Scoring (V2-03, plan_engine_v2.md) --------------------------
+    # boots_kb_factor ist ein MODUS-Schalter, kein reiner Skalar:
+    #   0.0  = die alte Regelkaskade (viel CC -> Tenacity, sonst AD/AP-Konter,
+    #          sonst die meistgespielten) - exakt das Verhalten vor V2-03,
+    #          damit die Ablation "Faktor 0 = alt" sauber messbar bleibt.
+    #   >0.0 = Score-Modus: Basis ist die champion-spezifische Pick-Rate, die
+    #          Comp-Signale sind nur noch gedeckelte Schuebe darauf. Der Faktor
+    #          skaliert dabei ALLE Schuebe (empirische Zellen UND Regel-Priors),
+    #          1.0 = volle Staerke.
+    # Wert 1.0 aus dem V2-03-Gate (Offline-Backtest 16.15, Holdout 5275 Matches,
+    # 38.340 Samples davon 9.914 Boots-Kaeufe, Sweep 0/0,5/1/2 auf identischer
+    # Trainings-KB): die Boots-Wahl trifft den tatsaechlichen Kauf primaer in
+    # 59,5 % statt 24,4 % der Faelle (Hit@1 gesamt 31,6 % -> 40,1 %, Hit@3
+    # 68,0 % -> 68,4 %), der Item-Pfad bleibt mit Item-Hit@3 67,6 % exakt
+    # unberuehrt - die Schicht bewegt genau das, was sie bewegen soll. 0,5 ist
+    # praktisch gleichwertig (59,3 %), 2,0 faellt wieder ab (58,4 %): die
+    # gedeckelten Schuebe brauchen keine zusaetzliche Verstaerkung, die Deckel
+    # SIND die Daempfung. Per Champion+Rolle (212 Kombis mit n >= 50) fallen nur
+    # 3 um mehr als 1 pp Hit@3, schlimmster Fall -1,9 pp.
+    boots_kb_factor: float = 1.0
+    boots_pick_cap: float = 0.2       # Cap der konditionalen Pick-Verschiebung
+    boots_win_cap: float = 0.15       # Cap der konditionalen Win-Verschiebung
+    boots_win_scale: float = 0.8      # Skalierung der Win-Verschiebung
+    boots_prior_cap: float = 0.15     # Cap der Regel-Priors (CC/AD/AP) zusammen
+    boots_comp_hint: bool = True      # Comp-Warnhinweis als eigener Vorschlag
+    # --- Restpfad-Neubewertung (V2-05, plan_engine_v2.md) ------------------
+    # path_rescore_factor ist ebenfalls ein Modus-Schalter:
+    #   0.0  = altes Verhalten (statische Core-Reihenfolge nach avg_slot, kein
+    #          Slot-Support-Filter).
+    #   >0.0 = gemeinsamer Kandidatenpool (restliche Core + Situationals): der
+    #          Slot-Support P(Slot|Item) am aktuellen Slot daempft den Basisterm,
+    #          Items ohne Support am aktuellen ODER einem spaeteren Slot fallen
+    #          raus, Core-Status ist nur noch ein Prior-Bonus. Der Faktor daempft
+    #          die Slot-Gewichtung linear Richtung neutral (1.0 = voll).
+    # Wert 0.6 aus dem V2-05-Gate (Offline-Backtest 16.15, Holdout 5275 Matches,
+    # 38.340 Samples, Sweep 0/0,4/0,6/0,8/1,0 auf identischer Trainings-KB):
+    # Hit@3 64,3 % -> 68,4 %, Item-Hit@3 61,9 % -> 67,6 %, Hit@1 36,5 % ->
+    # 40,1 %; der 3.+ Kauf - der Zielfall der Neubewertung, weil dort das
+    # uebersprungene Core-Item festklebte - 56,7 % -> 63,6 %.
+    #
+    # 0,8 sieht im Pool-Mittel minimal besser aus (Hit@3 68,7 %, Item 68,0 %),
+    # verliert aber genau dort, wo die Schicht wirken soll (3.+ Kauf 63,3 %),
+    # und laesst gegenueber 0,6 nochmal 48 von 212 Kombis um mehr als 1 pp
+    # fallen. Bei +0,3 pp Pool-Gewinn ist das kein Tausch, den man macht - 0,6
+    # bleibt. 1,0 faellt auch im Mittel wieder ab: die harte Slot-Daempfung
+    # schiebt dann Items weg, die im Nachbarslot voellig normal sind.
+    #
+    # Der Fokus-Pool des Nutzers profitiert ueberdurchschnittlich (0,0 -> 0,6):
+    # Janna UTILITY 34,4 % -> 65,6 %, Gwen JUNGLE 65,0 % -> 77,7 %, Briar
+    # JUNGLE 58,3 % -> 67,8 %, Jhin BOTTOM 67,5 % -> 74,5 %; einziger Ruecklauf
+    # Shyvana JUNGLE 70,2 % -> 69,6 % (-0,6 pp, innerhalb der Gate-Toleranz).
+    path_rescore_factor: float = 0.6
+    path_core_bonus: float = 0.15     # Prior-Bonus fuer Core-Status im Pool
+    # Gelernte Exklusiv-Paare (V2-04, `exclusive` in der KB) als HARTER
+    # Kandidaten-Ausschluss zusaetzlich zu items.conflicts. Bewusst ein Bool und
+    # kein Score-Gewicht: das ist eine Korrektheitsregel ("die beiden baut
+    # niemand zusammen"), keine Ranking-Stellschraube. Abschaltbar, damit die
+    # Ablation sie einzeln messen kann.
+    learned_exclusive: bool = True
+    # --- Behind-Situationals (V2-08, plan_engine_v2.md Konzept 3) ----------
+    # Reserviert bei defensiver Stance ODER scharfem Todes-Signal EINEN Slot im
+    # situativen Block fuer die beste defensive Option (Quellen-Kaskade
+    # Champion-Behind-Zelle -> Klassen-Behind-Fallback -> DEF_TAGS-Overlay).
+    # Bewusst ein Bool: die Reservierung ist eine Anzeige-Entscheidung ("zeig
+    # ihm nicht drei Glass-Cannon-Items, wenn er gerade dreimal gestorben ist"),
+    # kein Score-Gewicht. Der HAUPTVORSCHLAG (`next`) bleibt davon unberuehrt -
+    # die Mehrheit gewinnt, auch wenn das Rabadon ist (Nutzer-Vorgabe,
+    # plan_engine_v2.md Abschnitt 2). False = Ablations-/Alt-Verhalten.
+    defensive_slot: bool = True
 
 
 DEFAULT_WEIGHTS = Weights()
@@ -116,6 +185,21 @@ CONF_RICH_MIN = 400
 # tmp/calibrate_cc_threshold.py): p70=0.983, p72=0.995, p75=1.015. Glatter Wert
 # 1.0 liegt beim ~72.-73. Perzentil - die CC-lastigsten ~28% der Gegnerteams.
 CC_HEAVY_THRESHOLD = 1.0
+
+
+def _enemy_damage_bucket(enemy_profiles: list[dict]) -> str | None:
+    """'ad' | 'ap' | None - Schadenstyp-Bucket des Gegnerteams in der
+    TRAIN-Definition (ungewichtetes Mittel der Champion-Priors, Gegner ohne
+    Prior werden ausgelassen; s. pipeline/aggregate.py `_dmg_bucket`).
+
+    Bewusst NICHT der threat-gewichtete `team_damage_split`: die by_threat-/
+    boots_by_threat-Zellen wurden unter dieser Definition GEZAEHLT, und Train und
+    Serve muessen denselben Bucket bilden (Review-Befund G). `team_damage_split`
+    bleibt fuer Boots-Regeltexte, `_is_defensive` und die UI zustaendig."""
+    shares = [s for s in (champions.ad_share_for_id(p.get("champion_id"))
+                          for p in enemy_profiles) if s is not None]
+    bucket = champions.damage_bucket(shares)
+    return bucket if bucket in ("ad", "ap") else None
 
 
 def _spike_warnings(enemy_profiles: list[dict], my_completed: int) -> list[dict]:
@@ -359,6 +443,27 @@ class _RecContext:
     # Uebergangs-Bigramm (next_after, T1/T2): {<Vorgaenger>: [{item, count,
     # win_rate}]} des Champion+Rollen-Eintrags. Leer bei alter KB ohne Block.
     next_after: dict = field(default_factory=dict)
+    # Ausgewertetes Bigramm (einmal pro Lauf gebaut, s. _next_after_model) plus
+    # die FERTIGEN Besitz-Items als Bezugsmenge O des Lifts.
+    na_cond: dict = field(default_factory=dict)
+    na_marginal: dict = field(default_factory=dict)
+    na_owned: list = field(default_factory=list)
+    # Restpfad-Neubewertung (V2-05): Slot-Support P(Slot|Item), aktueller
+    # Kaufslot, gelernte Exklusiv-Paare. `path_scores`/`path_block` werden von
+    # _core_pick/_score_situationals BEFUELLT (Pool-Score je Kandidat bzw. Namen
+    # ohne Support am aktuellen Slot) und in _assemble_result gelesen.
+    slot_dist: dict = field(default_factory=dict)
+    slot_horizon: int = 0
+    cur_slot: int = 1
+    exclusive: list = field(default_factory=list)
+    path_scores: dict = field(default_factory=dict)
+    path_block: frozenset = frozenset()
+    # Todes-Signal aus dem Live-Kill-Feed (V2-08, `engine/rec_deaths.py`):
+    # {deaths, champion, champion_deaths, damage_type, trigger, reason} oder
+    # None. Default None (Layer stumm) - so bleiben alte Aufrufer/Tests, die den
+    # Kontext direkt bauen, unveraendert gueltig, und Backtest/Demo/alte Dumps
+    # verhalten sich exakt wie vor V2-08.
+    death_signal: dict | None = None
     # Konditionale Schichten (by_threat/by_state) - von _conditional_layers gefuellt
     enemy_bucket: str | None = None
     bt: dict | None = None
@@ -387,7 +492,8 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
                    ally_items: set[str] | None, weights: Weights,
                    champion_id: str | None,
                    ally_gold_spent: int | None = None,
-                   bot_partner: dict | None = None) -> _RecContext:
+                   bot_partner: dict | None = None,
+                   death_signal: dict | None = None) -> _RecContext:
     """Phase 1 (Befund S1): KB-/Kontext-Aufbau - Rolle, Threat, Split, CC, Lead,
     Stance, Archetyp. Baut das _RecContext-Objekt fuer die folgenden Phasen."""
     # Stabile Data-Dragon-ID fuer alle internen Lookups (Fix 5.7): KB, Klassen-
@@ -401,6 +507,11 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
     # CC-Last des Gegnerteams (Team-Mittel der Champion-CC-Priors) - steuert die
     # Tenacity-Boots-Regel und wird fuer die UI im Result ausgewiesen.
     enemy_cc_score = profiling.team_cc_score(enemy_profiles)
+    # Schadenstyp-Bucket des Gegnerteams (Train-Definition). Lag frueher in
+    # _conditional_layers; die Boots-Schicht (V2-03) laeuft VOR dieser Phase und
+    # braucht denselben Bucket fuer ihre boots_by_threat-Zelle - gleiche
+    # Rechnung, nur eine Phase frueher.
+    enemy_bucket = _enemy_damage_bucket(enemy_profiles)
     # Gemessenes Item-Gold des eigenen Spielers (identisch zur profiling-Metrik:
     # Summe gold.total des Inventars). Basis fuer beide Vorspruenge.
     my_gold_spent = items.categorize_gold(owned_ids or [])["gold_total"]
@@ -452,13 +563,28 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
     # duerfen das Upgrade nicht dauerhaft unterdruecken (s. items.is_upgraded_boots).
     has_boots = any(items.is_upgraded_boots(name) for name in owned_names)
 
+    # next_after-Bigramm (T2) einmal pro Lauf auswerten - Core-Pick (V2-05) und
+    # Situational-Scoring greifen auf dasselbe Modell zu. Bei abgeschalteter
+    # Schicht wird gar nichts erst gerechnet.
+    na_block = knowledge.next_after(cid, used_role)
+    na_cond, na_marginal = (_next_after_model(na_block)
+                            if weights.next_after_factor else ({}, {}))
+    na_owned = _owned_completed(owned_ids or []) if na_cond else []
+    # Restpfad-Neubewertung (V2-05): Slot-Support und gelernte Exklusivitaet
+    # nur laden, wenn die jeweilige Schicht ueberhaupt aktiv ist.
+    slot_dist = (knowledge.slot_dist(cid, used_role)
+                 if weights.path_rescore_factor > 0.0 else {})
+    exclusive = (knowledge.exclusive_pairs(cid, used_role)
+                 if weights.learned_exclusive else [])
+
     return _RecContext(
         champion=champion, used_role=used_role, role=role, cid=cid,
         owned_names=owned_names, owned_ids=owned_ids or [],
         enemy_profiles=enemy_profiles, ally_items=ally_items or set(),
         game_time=game_time, current_gold=current_gold, weights=weights,
-        bot_partner=bot_partner,
+        bot_partner=bot_partner, death_signal=death_signal,
         kb=kb, top=top, split=split, enemy_cc_score=enemy_cc_score,
+        enemy_bucket=enemy_bucket,
         fielded_lead=f_lead, earned_lead=e_lead,
         gold_state=gold_state, stance=stance, stance_reason=stance_reason,
         build=build, build_reason=build_reason, core_source=core_source,
@@ -466,28 +592,215 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
         has_boots=has_boots, boots_options=boots_options,
         # Uebergangs-Bigramm der Kombi (T2). Ueber den knowledge-Accessor, damit
         # alte builds.yaml ohne den Block sauber leer liefern.
-        next_after=knowledge.next_after(cid, used_role))
+        next_after=na_block, na_cond=na_cond, na_marginal=na_marginal,
+        na_owned=na_owned,
+        # Restpfad-Neubewertung (V2-05). Beide Accessors liefern fuer KBs vor
+        # V2-04 leer - dann bleibt der Slot-Support neutral (kein Ausschluss)
+        # und die gelernte Exklusivitaet stumm.
+        slot_dist=slot_dist, slot_horizon=_slot_horizon(slot_dist),
+        cur_slot=_current_slot(owned_ids, has_boots),
+        exclusive=exclusive)
+
+
+# --- Restpfad-Neubewertung (V2-05, plan_engine_v2.md Konzept 2) -------------
+# Vorher war die Core-Reihenfolge statisch (avg_slot): wer The Collector
+# uebersprungen hat, bekam ihn bis Spielende als naechsten Kauf empfohlen, und
+# jeder tatsaechliche Kauf zaehlte als Abweichung. Jetzt wird der Restpfad nach
+# jedem fertigen Item aus dem TATSAECHLICHEN Besitz neu bewertet:
+#
+#   Pool = restliche Core-Items + Situationals (ein Topf)
+#   Score = Pick-Rate * Slot-Support(aktueller Slot) * next_after-Lift
+#           + konditionale Schichten (+ Prior-Bonus fuer Core-Status)
+#
+# Der Slot-Support P(Slot|Item) aus V2-04 ist dabei der Troll-Guard in beide
+# Richtungen: ein Item, das in KEINEM Slot ab dem aktuellen gebaut wird, ist kein
+# Kandidat mehr (The Collector als 6. Item); eines mit Support erst spaeter bleibt
+# im Pool, wird aber nicht als `next` vorgeschlagen (Rabadon frueh).
+
+
+def _current_slot(owned_ids: list[int] | None, has_boots: bool) -> int:
+    """Kaufslot des NAECHSTEN fertigen Kaufs (1-basiert).
+
+    Spiegelt die Train-Definition aus pipeline/aggregate.py: Slot 1 ist der erste
+    fertige Kauf, und BOOTS ZAEHLEN MIT (ein spaeteres T3-Upgrade desselben
+    Boots-Strangs aber nicht - darum hoechstens +1 fuer Boots)."""
+    return items.count_completed(owned_ids or []) + (1 if has_boots else 0) + 1
+
+
+def _slot_horizon(slot_dist: dict) -> int:
+    """Hoechster Slot, fuer den die KB dieser Kombi UEBERHAUPT Support ausweist.
+
+    Die Slot-Verteilung ist bei n < SLOT_DIST_MIN_N gepruned - je spaeter der
+    Slot, desto haeufiger faellt er komplett weg. Fuer einen Support, dessen
+    Items alle bei Slot 4 enden, ist "kein Support ab Slot 5" darum KEINE Aussage
+    ueber den Build, sondern das Ende der Datenreichweite. Jenseits dieses
+    Horizonts schaltet der Slot-Layer auf neutral (s. `_slot_support`), statt
+    reihenweise Kandidaten aus einer Datenluecke heraus zu streichen."""
+    return max((max(d) for d in slot_dist.values() if d), default=0)
+
+
+# Wie weit DARF der aktuelle Slot ueber dem letzten belegten Slot eines Items
+# liegen, bevor es als Kandidat ausscheidet? 1, weil `slot_dist` bei
+# SLOT_DIST_MIN_N = 5 Beobachtungen prunet: der letzte ausgewiesene Slot ist der
+# letzte, an dem GENUEGEND Leute gekauft haben, nicht der letzte, an dem
+# ueberhaupt jemand gekauft hat. Ohne diese eine Slot Toleranz strich die Schicht
+# reihenweise reale Kaeufe (Lulus Mikael's Blessing endet bei Slot 3, wird real
+# aber auch als 4. Item gekauft - Hit@3 fiel dort um 24 Punkte).
+SLOT_LATE_TOLERANCE = 1
+
+# Gewichtung eines Items, das in einer Kombi MIT Slot-Daten selbst weder
+# `slot_dist` noch `avg_slot` hat - die Timelines haben es also nie als KAUF
+# gesehen. Der reale Fall dahinter sind Transform-Items: Muramana entsteht aus
+# Manamune per ITEM_TRANSFORM, ein ITEM_PURCHASED-Event gibt es nie. Aus den
+# End-Builds hat Jayce es als drittmeistgebautes Item (also im Core), ohne einen
+# einzigen beobachteten Kaufzeitpunkt. Ungedaempft gewann es damit den Pool und
+# wurde zum Dauer-Vorschlag, den der Spieler so gar nicht kaufen kann (Jayce TOP
+# Hit@1 20,5 % -> 1,3 %). Halbes Gewicht plus Sperre als `next`: sichtbar bleiben
+# darf es, empfohlen wird es nicht.
+SLOT_NO_DATA_FIT = 0.5
+
+
+def _slot_support(ctx: _RecContext, name: str,
+                  avg_slot: float | None = None) -> tuple[float, bool, bool]:
+    """(Slot-Faktor, Support jetzt?, Support jetzt oder spaeter?).
+
+    Der Faktor daempft den Basisterm eines Items, das in diesem Slot untypisch
+    ist: `now / peak` (Anteil im aktuellen Slot, relativ zum Lieblingsslot des
+    Items), linear ueber `path_rescore_factor` Richtung 1.0 gezogen.
+
+    Fehlt die Verteilung, greift `avg_slot` als groebere Rueckfallebene (Abstand
+    zum gelernten Durchschnittsslot), und fehlt auch die, SLOT_NO_DATA_FIT. Das
+    ist wichtig gegen eine stille Schieflage: ein Item OHNE `slot_dist` bliebe
+    sonst ungedaempft und wuerde genau dadurch nach vorne rutschen - auf Lulu
+    verdraengte der Support-Endform-Eintrag (kein slot_dist) so den Erstkauf
+    Ardent Censer aus der Liste. Aus dem POOL geworfen wird ueber diese
+    Rueckfallebenen NIE - `avg_slot` ist ein Mittelwert, kein Support-Nachweis.
+
+    Bewusst NEUTRAL (Faktor 1.0, Support ja) bleibt der Fall, dass der aktuelle
+    Slot jenseits des Datenhorizonts der Kombi liegt (`slot_horizon`): dort kappt
+    die Pruning-Schwelle der Pipeline jede Aussage, und ein fehlendes Datum darf
+    nie ein Item ausschliessen (auch alte KBs ohne das Feld landen hier)."""
+    if ctx.cur_slot > ctx.slot_horizon:
+        return 1.0, True, True
+    f = ctx.weights.path_rescore_factor
+    dist = ctx.slot_dist.get(name)
+    if not dist:
+        if avg_slot is None:
+            # Kein einziger beobachteter Kaufzeitpunkt (s. SLOT_NO_DATA_FIT).
+            return 1.0 + f * (SLOT_NO_DATA_FIT - 1.0), False, True
+        fit = 1.0 / (1.0 + abs(avg_slot - ctx.cur_slot))
+        return 1.0 + f * (fit - 1.0), True, True
+    peak = max(dist.values()) or 1.0
+    now = dist.get(ctx.cur_slot, 0.0)
+    later = ctx.cur_slot <= max(dist) + SLOT_LATE_TOLERANCE
+    return 1.0 + f * (now / peak - 1.0), now > 0, later
+
+
+def _learned_conflict(ctx: _RecContext, name: str) -> bool:
+    """True, wenn ein gelerntes Exklusiv-Paar (V2-04) den Kandidaten gegen ein
+    besessenes Item ausschliesst. Die Paare sind Mengen - beide Richtungen sind
+    damit automatisch abgedeckt."""
+    return any(name in pair and (pair - {name}) & ctx.owned_names
+               for pair in ctx.exclusive)
+
+
+def _core_reason(ctx: _RecContext, core: dict) -> str:
+    """Begruendungstext eines Core-Vorschlags (in beiden Modi identisch)."""
+    reason = f"Core-Build fuer {ctx.champion} {ctx.used_role}"
+    if ctx.build_reason:
+        reason += f" - {ctx.build_reason}"
+    purpose = explain_item(core["item"], ctx.split, ctx.top, role=_tag_role(ctx))
+    if purpose:
+        reason += f" - {purpose}"
+    reason += f" ({core['pick_rate']:.0%} Pick-Rate in High-Elo"
+    if core.get("avg_slot"):
+        reason += f", typisch {core['avg_slot']:.0f}. Kauf"
+    return reason + ")."
+
+
+def _core_rec(ctx: _RecContext, core: dict) -> dict:
+    return {"item": core["item"], "kind": "core",
+            "tag": _item_tag(core["item"], role=_tag_role(ctx)),
+            "reason": _core_reason(ctx, core),
+            "avg_slot": core.get("avg_slot")}
 
 
 def _core_pick(ctx: _RecContext, recs: list[dict]) -> None:
-    """Phase 2 (Befund S1): naechstes Core-Item, das noch fehlt (core ist nach
-    Kaufreihenfolge sortiert). Haengt hoechstens ein Core-Item an recs."""
+    """Phase 2 (Befund S1): naechstes Core-Item, das noch fehlt.
+
+    Legacy-Modus (path_rescore_factor == 0): das erste noch fehlende Core-Item in
+    gelernter Kaufreihenfolge. Restpfad-Modus (V2-05): das Core-Item mit dem
+    besten Pool-Score, Items ohne Slot-Support ab dem aktuellen Slot fallen ganz
+    raus. Haengt hoechstens ein Core-Item an recs."""
+    if ctx.weights.path_rescore_factor > 0.0:
+        _core_pick_path(ctx, recs)
+        return
     for core in ctx.core_source:
-        if core["item"] not in ctx.owned_names and not items.conflicts(core["item"], ctx.owned_names):
-            reason = f"Core-Build fuer {ctx.champion} {ctx.used_role}"
-            if ctx.build_reason:
-                reason += f" - {ctx.build_reason}"
-            purpose = explain_item(core["item"], ctx.split, ctx.top, role=_tag_role(ctx))
-            if purpose:
-                reason += f" - {purpose}"
-            reason += f" ({core['pick_rate']:.0%} Pick-Rate in High-Elo"
-            if core.get("avg_slot"):
-                reason += f", typisch {core['avg_slot']:.0f}. Kauf"
-            recs.append({"item": core["item"], "kind": "core",
-                         "tag": _item_tag(core["item"], role=_tag_role(ctx)),
-                         "reason": reason + ").",
-                         "avg_slot": core.get("avg_slot")})
+        if (core["item"] not in ctx.owned_names
+                and not items.conflicts(core["item"], ctx.owned_names)
+                and not _learned_conflict(ctx, core["item"])):
+            recs.append(_core_rec(ctx, core))
             break
+
+
+def _core_pick_path(ctx: _RecContext, recs: list[dict]) -> None:
+    """Core-Auswahl im Restpfad-Modus (V2-05). Fuellt zusaetzlich
+    `ctx.path_scores`/`ctx.path_block` fuer die spaetere Pool-Entscheidung."""
+    scores: dict[str, float] = {}
+    block: set[str] = set()
+    best: tuple[float, dict, bool] | None = None
+    skipped: list[dict] = []
+    for core in ctx.core_source:
+        name = core["item"]
+        if (name in ctx.owned_names or items.conflicts(name, ctx.owned_names)
+                or _learned_conflict(ctx, name)):
+            continue
+        mult, now_ok, later_ok = _slot_support(ctx, name, core.get("avg_slot"))
+        if not later_ok:
+            # Kein Slot-Support mehr ab hier - das Item ist kein Kandidat.
+            skipped.append(core)
+            continue
+        score = (core.get("pick_rate", 0.0) * mult
+                 * _next_after_lift(ctx.na_cond, ctx.na_marginal, ctx.na_owned,
+                                    name, ctx.weights.next_after_factor)
+                 # Core-Status gibt nur noch einen Prior-Bonus, keine Vorfahrt.
+                 + ctx.weights.path_core_bonus)
+        scores[name] = score
+        if not now_ok:
+            block.add(name)
+        if best is None or score > best[0]:
+            if best is not None:
+                skipped.append(best[1])
+            best = (score, core, now_ok)
+        else:
+            skipped.append(core)
+    ctx.path_scores = scores
+    ctx.path_block = frozenset(block)
+    if best is None:
+        return
+    rec = _core_rec(ctx, best[1])
+    note = _degraded_core_note(best[1], skipped)
+    if note:
+        rec["reason"] = rec["reason"].rstrip(".") + note + "."
+    recs.append(rec)
+
+
+def _degraded_core_note(chosen: dict, skipped: list[dict]) -> str:
+    """Hinweistext, wenn ein FRUEHERES Core-Item uebersprungen wurde: "dein Pfad
+    laeuft ueber X - Y waere ueblich 2. Item gewesen". Genannt wird das
+    frueheste uebersprungene Core-Item, und nur wenn es typischerweise VOR dem
+    jetzt vorgeschlagenen kommt - sonst ist es keine Abweichung, sondern die
+    normale Reihenfolge."""
+    chosen_slot = chosen.get("avg_slot")
+    if chosen_slot is None:
+        return ""
+    earlier = [s for s in skipped
+               if s.get("avg_slot") is not None and s["avg_slot"] < chosen_slot]
+    if not earlier:
+        return ""
+    y = min(earlier, key=lambda s: s["avg_slot"])
+    return (f" - dein Pfad laeuft ueber {chosen['item']}, "
+            f"{y['item']} waere ueblich {y['avg_slot']:.0f}. Item gewesen")
 
 
 def _choose_boots(options: list[dict], enemy_cc_score: float,
@@ -540,37 +853,49 @@ def _choose_boots(options: list[dict], enemy_cc_score: float,
     return out
 
 
+def _boots_defensive_want(split: dict, top: dict | None) -> tuple[str | None, str]:
+    """(Defensiv-Richtung, Begruendung) der Comp-Regel: 'ad' | 'ap' | None.
+
+    Klar AD-/AP-lastiges Gegnerteam (threat-gewichteter `split`), sonst der
+    Top-Threat-Tie-Breaker (ausgeglichenes Team, aber die staerkste Einzel-
+    bedrohung ist klar einseitig, Befund D aus review-2026-07-15.md).
+
+    Herausgezogen (V2-03), weil jetzt DREI Stellen dieselbe Definition brauchen:
+    die alte Regelkaskade, der Regel-Prior des Score-Modus und der Comp-Hinweis.
+    Der Trigger ist damit automatisch threat-gewichtet - ein fed Gegner zaehlt
+    ueber `team_damage_split`/`top` mehr als ein nuechterner Farmer."""
+    if split["ad"] >= 0.65:
+        return "ad", f"Gegnerschaden ist {split['ad']:.0%} AD - Ruestungs-Boots."
+    if split["ap"] >= 0.55:
+        return "ap", f"Gegnerschaden ist {split['ap']:.0%} AP - MR-Boots."
+    if top is not None:
+        top_split = top.get("damage_split")
+        if top_split:
+            if top_split.get("ad", 0) >= 0.6:
+                return "ad", (f"Staerkste Bedrohung {top['name']} ist "
+                              f"klar AD-lastig - Ruestungs-Boots.")
+            if top_split.get("ap", 0) >= 0.6:
+                return "ap", (f"Staerkste Bedrohung {top['name']} ist "
+                              f"klar AP-lastig - MR-Boots.")
+    return None, ""
+
+
 def _boots_kb(ctx: _RecContext) -> list[dict]:
-    """Phase 3, KB-Pfad (Befund S1/D5): Boots aus der Champion-KB nach
-    Gegnerschaden waehlen, wenn welche gelernt sind und der Spieler noch keine
-    traegt. Die situative AD/AP-Wahl gibt es NUR hier."""
+    """Phase 3, KB-Pfad (Befund S1/D5): Boots aus der Champion-KB waehlen, wenn
+    welche gelernt sind und der Spieler noch keine traegt.
+
+    Zwei Modi (s. Weights.boots_kb_factor): die alte Regelkaskade (Faktor 0) oder
+    das Scoring aus V2-03. Die situative AD/AP-Wahl der Kaskade gibt es NUR hier."""
     if not ctx.boots_options or ctx.has_boots:
         return []
+    if ctx.weights.boots_kb_factor > 0.0:
+        return _boots_scored_recs(
+            ctx, ctx.boots_options, cells=_boots_cells(ctx), source=None,
+            where=f"auf {ctx.champion} {ctx.used_role}")
     split, top, options = ctx.split, ctx.top, ctx.boots_options
 
     def situational(popular):
-        # Gewuenschte Defensiv-Richtung bestimmen (None = keine situative Wahl)
-        want = None
-        want_reason = ""
-        if split["ad"] >= 0.65:
-            want = "ad"
-            want_reason = f"Gegnerschaden ist {split['ad']:.0%} AD - Ruestungs-Boots."
-        elif split["ap"] >= 0.55:
-            want = "ap"
-            want_reason = f"Gegnerschaden ist {split['ap']:.0%} AP - MR-Boots."
-        elif top is not None:
-            # Tie-Breaker: ausgeglichener Team-Split, aber staerkste Bedrohung
-            # hat klar einseitigen damage_split -> gegen diesen Typ ausrichten.
-            top_split = top.get("damage_split")
-            if top_split:
-                if top_split.get("ad", 0) >= 0.6:
-                    want = "ad"
-                    want_reason = (f"Staerkste Bedrohung {top['name']} ist "
-                                   f"klar AD-lastig - Ruestungs-Boots.")
-                elif top_split.get("ap", 0) >= 0.6:
-                    want = "ap"
-                    want_reason = (f"Staerkste Bedrohung {top['name']} ist "
-                                   f"klar AP-lastig - MR-Boots.")
+        want, want_reason = _boots_defensive_want(split, top)
         if want:
             # Kandidat aus der KB-Boots-Liste oder kanonischer Fallback
             kb_boot = next((b for b in options if _is_defensive(b["item"], want)), None)
@@ -597,11 +922,16 @@ def _boots_kb(ctx: _RecContext) -> list[dict]:
 def _boots_class(ctx: _RecContext) -> list[dict]:
     """Phase 3, Klassen-Pfad (Befund S1/D5): hat der Champion selbst keine
     Boots-Daten (thin) und traegt der Spieler noch keine, die meistgespielten
-    Boots des Buckets empfehlen - klar gelabelt. Auch hier hat viel Gegner-CC
-    Vorrang (Tenacity vor den meistgespielten Klassen-Boots)."""
+    Boots des Buckets empfehlen - klar gelabelt. Im Score-Modus (V2-03) laeuft
+    derselbe Score, nur ohne konditionale Zellen (die Klassen-Aggregate haben
+    keine) - dort tragen also allein Pick-Rate und die gedeckelten Regel-Priors."""
     if not ctx.class_boots or ctx.boots_options or ctx.has_boots:
         return []
     label, lrole = ctx.class_label, ctx.lookup_role
+    if ctx.weights.boots_kb_factor > 0.0:
+        return _boots_scored_recs(
+            ctx, ctx.class_boots, cells={}, source="class",
+            where=f"in der Klasse {label} {lrole}")
     return _choose_boots(
         ctx.class_boots, ctx.enemy_cc_score, ctx.enemy_profiles,
         popular_reason=lambda c: (f"Meistgespielte Boots der Klasse "
@@ -613,6 +943,223 @@ def _boots_class(ctx: _RecContext) -> list[dict]:
         source="class", role=_tag_role(ctx))
 
 
+# --- Boots-Scoring (V2-03, plan_engine_v2.md Konzept 1) ---------------------
+# Vorher waehlte die Engine die Boots ueber eine starre Regelkaskade, und die
+# Regel schlug die Statistik: Janna bekam gegen ein AD-Gegnerteam Plated
+# Steelcaps, obwohl 88 % der Jannas Boots of Swiftness bauen und Steelcaps in
+# ihrer Boots-Liste gar nicht vorkommt. Seit V2-02 traegt die KB genug Substanz
+# fuer den umgekehrten Weg:
+#
+#   Score(Boots) = Pick-Rate                       (champion-spezifische Basis)
+#                + f * konditionale Schuebe        (boots_by_threat/_cc/_state)
+#                + f * gedeckelte Regel-Priors     (viel CC -> Tenacity,
+#                                                   AD/AP-Comp -> Konter-Boots)
+#
+# Damit koennen die Comp-Signale eine klare Champion-Statistik nicht mehr drehen
+# (der Prior-Deckel ist kleiner als ein deutlicher Pick-Rate-Abstand) - sie
+# bleiben aber sichtbar: als Comp-Hinweis mit beiden Zahlen (_boots_comp_hint).
+
+
+def _boots_cells(ctx: _RecContext) -> dict:
+    """Konditionale Boots-Zellen (V2-02) der Kombi - oder leer.
+
+    Dasselbe Konfidenz-Gate wie bei by_threat/by_state: unterhalb von
+    CONF_RICH_MIN sind die situativen Zellen einer Kombi nicht belastbar, und die
+    UI sagt genau das ("situative Signale zu duenn"). Die Boots-Schicht faellt
+    dann auf Pick-Rate + Regel-Priors zurueck - was fuer den Janna-Fall bereits
+    reicht, weil dort die Pick-Rate selbst eindeutig ist."""
+    if ctx.confidence != "rich":
+        return {}
+    return knowledge.boots_cells(ctx.cid, ctx.used_role)
+
+
+def _cell_total(cell: dict) -> int:
+    """Beobachtungszahl einer konditionalen Boots-Zelle: `games` bei
+    by_threat/by_cc, `purchases` bei by_state - beides der Nenner der bedingten
+    Pick-Rate."""
+    return int(cell.get("games") or cell.get("purchases") or 0)
+
+
+def _boots_cond_boost(cell: dict | None, name: str, pick_rate: float,
+                      weights: Weights) -> tuple[float, float | None]:
+    """(Schub, bedingte Pick-Rate fuer den Text) einer konditionalen Zelle.
+
+    Zwei Signale, beide mit der Hygiene der Item-Schichten (RANK_MIN_N-Gate,
+    Shrinkage, Cap):
+
+    - **Pick-Verschiebung** P(Boots | Lage) gegen die unkonditionierte Pick-Rate.
+      Der Nenner dieser Schaetzung ist die ZELLGROESSE (wie viele Spiele/Kaeufe
+      fielen in diese Lage), nicht die Zahl der Kaeufe genau dieser Boots -
+      darum haengen Gate und Shrinkage daran. Das ist das Signal, das die Frage
+      "baut man in DIESER Lage andere Boots?" direkt beantwortet, und es ist
+      genau die Groesse, die auch der Backtest misst (was wurde gekauft).
+    - **Win-Verschiebung** gegen die Basisrate der Zelle, gegated auf die Zahl
+      der Kaeufe dieser Boots (n) - identisch zu by_threat/by_state bei Items.
+
+    Fehlt der Boots in der Zelle (unter der Export-Schwelle der Pipeline), traegt
+    sie NICHTS bei: kein stiller Malus aus einer Datenluecke (gleiche Regel wie
+    beim next_after-Lift)."""
+    if not cell:
+        return 0.0, None
+    total = _cell_total(cell)
+    row = next((i for i in cell.get("items") or [] if i.get("item") == name), None)
+    if not row or total <= 0:
+        return 0.0, None
+    boost = 0.0
+    cond_pick = None
+    if total >= RANK_MIN_N:
+        cond_pick = row.get("pick_rate")
+        if cond_pick is None:
+            cond_pick = row.get("count", 0) / total
+        shrunk = _shrunk(cond_pick, total, pick_rate)
+        boost += max(-weights.boots_pick_cap,
+                     min(weights.boots_pick_cap, shrunk - pick_rate))
+    base_wr = cell.get("base_win_rate")
+    n = row.get("count")
+    if base_wr is not None and n is not None and n >= RANK_MIN_N:
+        wr = _shrunk(row.get("win_rate", base_wr), n, base_wr)
+        boost += max(-weights.boots_win_cap,
+                     min(weights.boots_win_cap,
+                         weights.boots_win_scale * (wr - base_wr)))
+    return boost, cond_pick
+
+
+def _boots_cc_key(enemy_cc_score: float) -> str | None:
+    """'cc_heavy' | 'cc_light' | None - Serve-Seite des CC-Buckets, symmetrisch zu
+    pipeline/aggregate.py `_cc_bucket` (gleiche Rechnung ueber
+    profiling.team_cc_score, gleiche Schwelle). Score 0 heisst "kein einziger
+    CC-Prior im Gegnerteam" - dann bucketet auch die Train-Seite nicht."""
+    if enemy_cc_score <= 0:
+        return None
+    return "cc_heavy" if enemy_cc_score >= CC_HEAVY_THRESHOLD else "cc_light"
+
+
+def _boots_scored(ctx: _RecContext, options: list[dict],
+                  cells: dict) -> list[list]:
+    """[[score, option, note], ...], absteigend - der Score-Modus der Boots-Wahl."""
+    w = ctx.weights
+    f = max(0.0, w.boots_kb_factor)
+    want, _want_reason = _boots_defensive_want(ctx.split, ctx.top)
+    cc_key = _boots_cc_key(ctx.enemy_cc_score)
+    cc_heavy = cc_key == "cc_heavy"
+    used = []
+    if ctx.enemy_bucket:
+        used.append(((cells.get("by_threat") or {}).get(ctx.enemy_bucket),
+                     f"gegen {ctx.enemy_bucket.upper()}-lastige Teams"))
+    if cc_key:
+        used.append(((cells.get("by_cc") or {}).get(cc_key),
+                     "bei viel Gegner-CC" if cc_heavy else "bei wenig Gegner-CC"))
+    if ctx.gold_state:
+        used.append(((cells.get("by_state") or {}).get(ctx.gold_state),
+                     "wenn du vorne liegst" if ctx.gold_state == "ahead"
+                     else "wenn du hinten liegst"))
+    rows: list[list] = []
+    for opt in options:
+        name = opt["item"]
+        pick = opt.get("pick_rate") or 0.0
+        score, note, best = pick, "", 0.0
+        for cell, label in used:
+            delta, cond = _boots_cond_boost(cell, name, pick, w)
+            score += f * delta
+            if cond is not None and abs(delta) > abs(best):
+                best, note = delta, f" - {cond:.0%} {label}"
+        # Regel-Priors: gemeinsam gedeckelt. Sie duerfen einen deutlichen
+        # Pick-Rate-Abstand NICHT mehr ueberstimmen - das war der Kern des
+        # Janna-Befunds. Zwei zutreffende Regeln heben den Deckel nicht.
+        prior = 0.0
+        if cc_heavy and items.is_tenacity_boots(name):
+            prior = w.boots_prior_cap
+        if want and _is_defensive(name, want):
+            prior = w.boots_prior_cap
+        score += f * prior
+        rows.append([score, opt, note])
+    rows.sort(key=lambda r: -r[0])
+    return rows
+
+
+def _boots_comp_hint(ctx: _RecContext, chosen: dict, chosen_pick: float,
+                     options: list[dict]) -> dict | None:
+    """Comp-Warnhinweis (V2-03): die Comp-Signale sind stark, die Champion-
+    Statistik sagt aber etwas anderes.
+
+    Dann verschwindet das Signal nicht (das war der Fehler der alten Kaskade in
+    die andere Richtung), sondern wird ein EIGENER situativer Vorschlag mit
+    BEIDEN Zahlen - "78 % Swiftness, gegen 64 % AD waere Steelcaps denkbar (7 %
+    bauen das)". Der Hauptvorschlag bleibt unangetastet."""
+    if not ctx.weights.boots_comp_hint:
+        return None
+    want, want_reason = _boots_defensive_want(ctx.split, ctx.top)
+    cc_heavy = _boots_cc_key(ctx.enemy_cc_score) == "cc_heavy"
+    cand = trigger = None
+    if cc_heavy:
+        cand = next((b["item"] for b in options
+                     if items.is_tenacity_boots(b["item"])), None)
+        cand = cand or items.standard_defensive_boots("ap")
+        who = ", ".join(profiling.cc_threats(ctx.enemy_profiles))
+        trigger = f"viel CC im Gegnerteam ({who})" if who else "viel CC im Gegnerteam"
+    elif want:
+        cand = next((b["item"] for b in options
+                     if _is_defensive(b["item"], want)), None)
+        cand = cand or items.standard_defensive_boots(want)
+        # "Gegnerschaden ist 91% AD" / "Staerkste Bedrohung Zed ist klar AD-lastig"
+        trigger = want_reason.split(" - ")[0].rstrip(".")
+    if not cand or not trigger or cand == chosen["item"]:
+        return None
+    if not items.is_valid_sr(cand):
+        return None
+    row = next((b for b in options if b["item"] == cand), None)
+    share = (f"{row['pick_rate']:.0%} bauen das" if row and row.get("pick_rate")
+             else "praktisch niemand baut das")
+    return {"item": cand, "kind": "boots", "alternative": True, "hint": True,
+            "tag": _item_tag(cand, role=_tag_role(ctx)),
+            "avg_slot": row.get("avg_slot") if row else None,
+            "reason": (f"Hinweis: {chosen_pick:.0%} bauen {chosen['item']} - "
+                       f"{trigger}: da waere {cand} denkbar ({share}).")}
+
+
+def _boots_scored_recs(ctx: _RecContext, options: list[dict], *, cells: dict,
+                       source: str | None, where: str) -> list[dict]:
+    """Boots-Empfehlungen im Score-Modus: Hauptvorschlag (bester Score), die
+    meistgespielten als `alternative` (falls abweichend) und der Comp-Hinweis
+    (falls die Comp etwas anderes nahelegt). Maximal drei Eintraege, der
+    Hauptvorschlag steht IMMER vorn - `_pick_next` nimmt genau den."""
+    rows = _boots_scored(ctx, options, cells)
+    if not rows:
+        return []
+    _score, chosen, note = rows[0]
+    popular = options[0]
+    pick = chosen.get("pick_rate") or 0.0
+    role = _tag_role(ctx)
+    lead = ("Meistgespielte Boots" if chosen["item"] == popular["item"]
+            else "Statistisch beste Boots in dieser Lage")
+    rec = {"item": chosen["item"], "kind": "boots",
+           "reason": f"{lead} {where} ({pick:.0%} Pick){note}.",
+           "tag": _item_tag(chosen["item"], role=role),
+           "avg_slot": chosen.get("avg_slot"),
+           # Kauf-Timing (V2-02): Minuten-Quantile der Boots-Fertigstellung.
+           # `_pick_next` nutzt sie als gelernten Ersatz fuer die 10-Minuten-
+           # Faustregel, wenn keine avg_slot-Reihenfolge vorliegt.
+           "minute": chosen.get("minute")}
+    if source:
+        rec["source"] = source
+    out = [rec]
+    if chosen["item"] != popular["item"]:
+        alt = {"item": popular["item"], "kind": "boots",
+               "reason": (f"Alternative: meistgespielte Boots {where} "
+                          f"({popular.get('pick_rate', 0):.0%})."),
+               "tag": _item_tag(popular["item"], role=role),
+               "avg_slot": popular.get("avg_slot"), "alternative": True}
+        if source:
+            alt["source"] = source
+        out.append(alt)
+    hint = _boots_comp_hint(ctx, chosen, pick, options)
+    if hint and all(hint["item"] != r["item"] for r in out):
+        if source:
+            hint["source"] = source
+        out.append(hint)
+    return out
+
+
 def _conditional_layers(ctx: _RecContext) -> None:
     """Phase 4 (Befund S1): by_threat-/by_state-Schichten vorbereiten inkl.
     Konfidenz-Gate und Klassen-Fallback-Datenbeschaffung. Fuellt die
@@ -621,21 +1168,16 @@ def _conditional_layers(ctx: _RecContext) -> None:
     # Threat-konditionierte Item-Win-Rates (Schicht 4, datengetrieben): gegen
     # ein klar AD- bzw. AP-lastiges Gegnerteam zaehlt, was empirisch gewonnen hat.
     # WICHTIG (Review G): Der by_threat-Lookup nutzt die TRAIN-Definition -
-    # ungewichtetes Mittel der Champion-Priors (champions.damage_bucket), NICHT
-    # das threat-gewichtete `split`. Nur so werden die gelernten Zellen unter
-    # derselben Definition abgefragt, unter der sie gezaehlt wurden. Gegner ohne
-    # bekannten Prior werden wie auf der Train-Seite weggelassen; `split` bleibt
-    # fuer Boots-/Defensiv-Texte unveraendert threat-gewichtet.
-    _enemy_shares = [s for s in (champions.ad_share_for_id(p.get("champion_id"))
-                                 for p in ctx.enemy_profiles) if s is not None]
-    enemy_bucket = champions.damage_bucket(_enemy_shares)
-    if enemy_bucket not in ("ad", "ap"):
-        enemy_bucket = None
+    # ungewichtetes Mittel der Champion-Priors (`_enemy_damage_bucket`, seit
+    # V2-03 bereits in _build_context berechnet), NICHT das threat-gewichtete
+    # `split`. Nur so werden die gelernten Zellen unter derselben Definition
+    # abgefragt, unter der sie gezaehlt wurden; `split` bleibt fuer Boots-/
+    # Defensiv-Texte unveraendert threat-gewichtet.
+    enemy_bucket = ctx.enemy_bucket
     bt = kb.get("by_threat", {}).get(enemy_bucket) if enemy_bucket else None
     # Volle Item-Dicts behalten (count/win_rate) + Basisrate des Buckets fuer
     # Shrinkage und Ranking-Gate. base_win_rate kann bei kuratierten Overrides
     # oder alter KB fehlen -> dann Kuratiert-Pfad (kein Gate, keine Shrinkage).
-    ctx.enemy_bucket = enemy_bucket
     ctx.bt = bt
     ctx.threat_items = {t["item"]: t for t in bt["items"]} if bt else {}
     ctx.threat_base = bt.get("base_win_rate") if bt else None
@@ -759,6 +1301,196 @@ def _partner_adjust(ctx: _RecContext, name: str, score: float,
     return score, why
 
 
+# --- Behind-Situationals + Todes-Signal (V2-08, plan_engine_v2.md Konzept 3) -
+# Der Hauptvorschlag (`next`) bleibt ehrlich: die Mehrheit gewinnt, auch wenn das
+# bei Rueckstand Rabadon ist (abgestimmte Design-Entscheidung, plan_engine_v2.md
+# Abschnitt 2). Was sich aendert, ist der situative BLOCK: bei defensiver Stance
+# oder scharfem Todes-Signal (rec_deaths.death_signal) bekommt er mindestens
+# einen Slot fuer eine defensive Option - statt drei Glass-Cannon-Items an einen
+# Spieler auszuliefern, der gerade dreimal von demselben Gegner gestorben ist.
+#
+# Quellen-Kaskade, jede Stufe mit EHRLICHER Kennzeichnung im Begruendungstext:
+#   1. Champion-Behind-Zelle (`by_state.behind`, V2-07) ab DEF_SLOT_MIN_N Kaeufen
+#   2. Klassen-Behind-Fallback (`knowledge.class_by_state`, V2-07) - klar als
+#      Klassen-Daten gelabelt (`source: "class"`)
+#   3. DEF_TAGS-Overlay aus dem Champion-Pool: "zu duenn fuer Behind-Statistik,
+#      aber defensiv - X % Pick, Y % Win global"
+
+# Mindest-`count` einer Behind-Zelle, damit sie als CHAMPION-eigene Evidenz
+# durchgeht. Gleiche Groessenordnung wie OK_STATE_MIN_N im Post-Game-Check
+# (app/postgame/build_replay.py): der Pipeline-Cutoff MIN_STATE_ITEM = 5 laesst
+# Zellen zu, die fuer eine Empfehlung zu duenn sind - Gwens eigene Behind-Zelle
+# fuehrt Zhonya mit 8 und Riftmaker mit 9 Kaeufen. Unter dieser Schwelle ist der
+# Klassen-Fallback (ap_fighter JUNGLE: Zhonya n=45) die ehrlichere Quelle.
+DEF_SLOT_MIN_N = 10
+
+
+def _defensive_layer_active(ctx: _RecContext) -> bool:
+    """Feuert die Slot-Reservierung? Defensive Stance ODER scharfes Todes-Signal
+    - und nur, solange der Schalter `defensive_slot` an ist (Ablation)."""
+    if not ctx.weights.defensive_slot:
+        return False
+    return ctx.stance == "defensive" or bool(ctx.death_signal)
+
+
+def _def_want(ctx: _RecContext) -> str | None:
+    """'ad' | 'ap' | None - gegen welchen Schadenstyp die defensive Option
+    zaehlen soll. Das Todes-Signal hat Vorrang (es misst, woran der Spieler
+    TATSAECHLICH stirbt), sonst die bestehende Comp-Regel."""
+    sig = ctx.death_signal or {}
+    if sig.get("damage_type") in ("ad", "ap"):
+        return sig["damage_type"]
+    want, _reason = _boots_defensive_want(ctx.split, ctx.top)
+    return want
+
+
+def _def_rank(name: str, want: str | None) -> int:
+    """Sortierrang eines defensiven Kandidaten: 0 = passende Resistenz
+    (Ruestung gegen AD, MR gegen AP), 1 = nur HP (hilft gegen beides, aber
+    unspezifisch), 2 = alles Uebrige."""
+    tags = items.tags_of(name)
+    if want == "ad":
+        key = "Armor"
+    elif want == "ap":
+        key = "SpellBlock"
+    else:
+        return 0 if tags & items.DEF_TAGS else 2
+    if key in tags:
+        return 0
+    return 1 if "Health" in tags else 2
+
+
+def _def_usable(ctx: _RecContext, name: str, taken: set[str]) -> bool:
+    """Dieselben harten Filter wie ueberall (besessen, geteilte Passive,
+    gelernte Exklusivitaet, SR-Gueltigkeit) plus: nicht schon im Block."""
+    return (name not in taken and name not in ctx.owned_names
+            and not items.conflicts(name, ctx.owned_names)
+            and not _learned_conflict(ctx, name)
+            and items.is_valid_sr(name))
+
+
+def _behind_row(ctx: _RecContext, cell: dict, taken: set[str],
+                want: str | None, min_n: int) -> dict | None:
+    """Bester defensiv markierter Eintrag einer `by_state.behind`-Zelle ab
+    `min_n` Kaeufen - passende Resistenz zuerst, dann die haeufigere Zelle."""
+    rows = [r for r in (cell or {}).get("items") or []
+            if r.get("defensive") and int(r.get("count") or 0) >= min_n
+            and _def_usable(ctx, r.get("item", ""), taken)]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (_def_rank(r["item"], want), -int(r.get("count") or 0)))
+    return rows[0]
+
+
+def _pool_def_row(ctx: _RecContext, taken: set[str],
+                  want: str | None) -> dict | None:
+    """Letzte Stufe: defensiv getaggtes Item aus dem Champion-Pool selbst
+    (core + situational). Ohne Behind-Statistik, dafuer mit den globalen Zahlen
+    des Champions - und genau so wird es im Text auch ausgewiesen."""
+    rows = [e for e in list(ctx.situational_source) + list(ctx.core_source)
+            if items.tags_of(e.get("item", "")) & items.DEF_TAGS
+            and _def_usable(ctx, e.get("item", ""), taken)]
+    if not rows:
+        return None
+    rows.sort(key=lambda e: (_def_rank(e["item"], want),
+                             -(e.get("pick_rate") or 0.0)))
+    return rows[0]
+
+
+def _death_note(ctx: _RecContext, name: str) -> str:
+    """Personalisierter Vorsatz aus dem Kill-Feed ("3x von Viego gestorben -
+    Zhonya's Hourglass macht dich ueberlebensfaehiger.") oder leer."""
+    sig = ctx.death_signal
+    if not sig or not sig.get("reason"):
+        return ""
+    return f"{sig['reason']} - {name} macht dich ueberlebensfaehiger. "
+
+
+def _defensive_rec(ctx: _RecContext, taken: set[str]) -> dict | None:
+    """Die beste defensive Option fuer den reservierten Slot - oder None, wenn
+    keine Quelle etwas hergibt (dann bleibt der Block unveraendert)."""
+    want = _def_want(ctx)
+    source = None
+    avg_slot = None
+
+    row = _behind_row(ctx, (ctx.kb.get("by_state") or {}).get("behind") or {},
+                      taken, want, DEF_SLOT_MIN_N)
+    if row:
+        name = row["item"]
+        reason = (f"Defensiv-Option bei Rueckstand: {name} wird auf "
+                  f"{ctx.champion} {ctx.used_role} hinten {int(row['count'])}x "
+                  f"gekauft ({row.get('win_rate', 0.0):.0%} Win).")
+    else:
+        bucket = ctx.class_bucket or champions.bucket_for_id(ctx.cid)
+        lrole = ctx.lookup_role or ctx.used_role or ctx.role or ""
+        cell = (knowledge.class_by_state(bucket, lrole) or {}).get("behind") or {}
+        row = _behind_row(ctx, cell, taken, want, DEF_SLOT_MIN_N)
+        if row:
+            name = row["item"]
+            label = _bucket_label(bucket)
+            source = "class"
+            reason = (f"Defensiv-Option bei Rueckstand aus Klassen-Daten: "
+                      f"{label} {lrole} bauen hinten {name} "
+                      f"(n={int(row['count'])}, {row.get('win_rate', 0.0):.0%} "
+                      f"Win) - die Behind-Zelle von {ctx.champion} ist dafuer "
+                      f"zu duenn.")
+        else:
+            row = _pool_def_row(ctx, taken, want)
+            if not row:
+                return None
+            name = row["item"]
+            avg_slot = row.get("avg_slot")
+            reason = (f"Defensiv-Option: zu duenn fuer Behind-Statistik, aber "
+                      f"defensiv - {row.get('pick_rate', 0.0):.0%} Pick, "
+                      f"{row.get('win_rate', 0.0):.0%} Win global.")
+
+    rec = {"item": name, "kind": "situational",
+           "tag": _item_tag(name, role=_tag_role(ctx)),
+           "reason": _death_note(ctx, name) + reason,
+           "defensive": True,
+           # Markierung fuer Frontend/Report: dieser Eintrag steht hier, weil ein
+           # Slot fuer eine defensive Option reserviert wurde - nicht, weil er
+           # den Score-Wettbewerb gewonnen hat.
+           "defensive_slot": True,
+           "avg_slot": avg_slot}
+    if source:
+        rec["source"] = source
+    return rec
+
+
+def _reserve_defensive(ctx: _RecContext, recs: list[dict],
+                       chosen: list[dict]) -> list[dict]:
+    """Reserviert im situativen Block einen Platz fuer die defensive Option.
+
+    Ist bereits ein defensives Item unter den gewaehlten drei, bleibt der Block
+    unveraendert - dann bekommt es bei aktivem Todes-Signal nur den
+    personalisierten Begruendungszusatz. Sonst kommt die defensive Option als
+    ZUSAETZLICHER, markierter Eintrag ans Ende (`defensive_slot: True`).
+
+    **Warum additiv statt verdraengend** (Kontrolllauf 2026-07-31, Backtest
+    16.15, 38.340 Samples auf derselben Trainings-KB wie die V2-03-/V2-05-
+    Gates): Die urspruengliche Variante ersetzte den schwaechsten der drei
+    Eintraege. Das kostete Hit@3 zwar nur 0,03 pp (68,43 -> 68,40 %, Boots
+    exakt unveraendert) - aber die Vorgabe fuer diese Schicht war "hit@3 darf
+    NICHT fallen", und ein verdraengter Eintrag ist gemessene Evidenz, die
+    verschwindet. Additiv kann Hit@3 strukturell nicht sinken: die gemessene
+    Kandidaten-Top-3 (`replay_profile.replay_candidates`) bleibt Zeichen fuer
+    Zeichen dieselbe, der Zusatz-Eintrag steht dahinter. Der Preis ist ein
+    vierter Eintrag im Block, wenn der Layer feuert - und genau der ist der
+    Punkt: der Spieler sieht dann nicht mehr NUR Glass-Cannon-Items."""
+    if not _defensive_layer_active(ctx):
+        return chosen
+    already = next((r for r in chosen if r.get("defensive")), None)
+    if already is not None:
+        note = _death_note(ctx, already["item"])
+        if note:
+            already["reason"] = already["reason"].rstrip() + " " + note.rstrip()
+        return chosen
+    taken = {r["item"] for r in recs} | {r["item"] for r in chosen}
+    rec = _defensive_rec(ctx, taken)
+    return chosen if rec is None else chosen + [rec]
+
+
 def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
     """Phase 6 (Befund S1): der grosse Scoring-Loop ueber situational_source +
     Klassen-Kandidaten inkl. Zwei-Pass-defensive_stance-Boost, Sortierung und
@@ -772,12 +1504,16 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
     class_label, lookup_role, class_games = ctx.class_label, ctx.lookup_role, ctx.class_games
     partner_on = _partner_layer_active(ctx)
     tag_role = _tag_role(ctx)
-    # next_after-Bigramm (T2): bedingte Verteilung + Marginal-Referenz einmal pro
-    # Lauf bauen; `na_owned` sind die FERTIGEN Items im Besitz (Menge O). Bei
-    # abgeschalteter Schicht (Default) wird gar nichts erst gerechnet.
-    na_cond, na_marginal = (_next_after_model(ctx.next_after)
-                            if weights.next_after_factor else ({}, {}))
-    na_owned = _owned_completed(owned_ids) if na_cond else []
+    # next_after-Bigramm (T2): bedingte Verteilung + Marginal-Referenz sind schon
+    # in _build_context gebaut (seit V2-05 teilt sich der Core-Pick dasselbe
+    # Modell); `na_owned` sind die FERTIGEN Items im Besitz (Menge O).
+    na_cond, na_marginal, na_owned = ctx.na_cond, ctx.na_marginal, ctx.na_owned
+    # Restpfad-Neubewertung (V2-05): Slot-Support daempft den Basisterm, Items
+    # ohne Support ab dem aktuellen Slot fallen raus, die Pool-Scores wandern
+    # nach ctx (Entscheidung faellt in _assemble_result).
+    path_on = weights.path_rescore_factor > 0.0
+    path_scores: dict[str, float] = {}
+    path_block: set[str] = set()
 
     # 3. Situative Items, nach Stance und Gegnerteam umsortiert. Zuerst die
     # eigenen Champion-Kandidaten (`scored`), dann - nur bei aktivem Fallback -
@@ -794,8 +1530,20 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
         sources.append((entry, "class"))
     for entry, source in sources:
         name = entry["item"]
-        if name in owned_names or items.conflicts(name, owned_names):
+        if (name in owned_names or items.conflicts(name, owned_names)
+                or _learned_conflict(ctx, name)):
             continue
+        slot_mult = 1.0
+        if path_on:
+            slot_mult, now_ok, later_ok = _slot_support(
+                ctx, name, entry.get("avg_slot"))
+            if not later_ok:
+                # In keinem Slot ab dem aktuellen gebaut -> kein Kandidat mehr.
+                continue
+            if not now_ok:
+                # Support erst spaeter: bleibt im Pool (Sichtbarkeit), darf aber
+                # nicht als naechster Kauf vorgeschlagen werden.
+                path_block.add(name)
         # Basis-Score = Pick-Rate, multiplikativ mit dem next_after-Lift. Der
         # Lift greift BEWUSST am Basisterm an, nicht am Endscore: der Endscore
         # kann durch Redundanz-/Partner-Abzuege negativ werden, und ein Faktor
@@ -804,7 +1552,7 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
         # >= 0, damit ist die Richtung des Lifts eindeutig. Ausgeschlossene
         # Kandidaten (owned/conflicts) sind oben bereits raus - sie bekommen
         # nie einen Lift.
-        score = entry["pick_rate"] * _next_after_lift(
+        score = entry["pick_rate"] * slot_mult * _next_after_lift(
             na_cond, na_marginal, na_owned, name, weights.next_after_factor)
         # Win-Rates nie ohne n: wo die KB die Fallzahl mitliefert, ausweisen.
         n_txt = f", n={entry['count']}" if entry.get("count") is not None else ""
@@ -926,6 +1674,10 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
             class_scored.append([score, rec])
         else:
             scored.append([score, rec])
+            # Nur Champion-Evidenz kommt in den Pool: Klassen-Kandidaten ranken
+            # per Design IMMER hinter den eigenen (rein additiv) und duerfen
+            # darum auch den `next`-Kandidaten nicht bestimmen.
+            path_scores[name] = score
     # Variante 1 (Review 5.3, Backtest-belegt): bei defensiver Stance bekommt NUR
     # das bestplatzierte defensive Item den defensive_stance-Boost - eine
     # 1/4-Gwen braucht ein defensives Zugestaendnis, nicht drei Tank-Optionen.
@@ -940,7 +1692,37 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
     # Klassen-Kandidaten IMMER hinter den eigenen ranken (additiv): so kann der
     # Fallback nur leere Plaetze fuellen, aber keinen Champion-Kandidaten aus den
     # Top-3 verdraengen (Hit@3 kann dadurch nicht sinken).
-    recs.extend(rec for _, rec in (scored + class_scored)[:3])
+    if path_on:
+        # NEU zuweisen statt mutieren: _second_next_pick arbeitet auf einer
+        # dataclasses.replace-Kopie, die sich die Dict-Referenzen mit dem
+        # Original teilt (gleiche Regel wie in _conditional_layers). Muss VOR
+        # der Slot-Reservierung passieren: die fragt ueber `_path_winner` genau
+        # diese Pool-Scores ab, um den `next`-Kandidaten nicht zu verdraengen.
+        ctx.path_scores = {**ctx.path_scores, **path_scores}
+        ctx.path_block = ctx.path_block | frozenset(path_block)
+    # Behind-Situationals (V2-08): bei defensiver Stance oder Todes-Signal
+    # bekommt der Block mindestens eine defensive Option.
+    recs.extend(_reserve_defensive(
+        ctx, recs, [rec for _, rec in (scored + class_scored)[:3]]))
+
+
+def _path_winner(ctx: _RecContext, recs: list[dict]) -> str | None:
+    """Sieger des gemeinsamen Kandidatenpools (V2-05) - der Name, der im
+    Restpfad-Modus die Rolle uebernimmt, die vorher das Core-Item per Vorfahrt
+    hatte. None im Legacy-Modus oder wenn kein Pool-Kandidat uebrig ist.
+
+    Uebersprungen werden Namen ohne Slot-Support JETZT (`path_block`) und das
+    Anti-Heal-Item: Anti-Heal ist bewusst eine Option, kein Pflichtkauf, und darf
+    auch ueber den Pool nicht zum naechsten Kauf werden."""
+    if ctx.weights.path_rescore_factor <= 0.0 or not ctx.path_scores:
+        return None
+    by_name = {r["item"]: r for r in recs}
+    for name, _score in sorted(ctx.path_scores.items(), key=lambda kv: -kv[1]):
+        rec = by_name.get(name)
+        if rec is None or rec.get("antiheal") or name in ctx.path_block:
+            continue
+        return name
+    return None
 
 
 def _assemble_result(ctx: _RecContext, recs: list[dict],
@@ -955,7 +1737,9 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
                            ctx.current_gold, ctx.owned_ids,
                            stance_next=ctx.weights.stance_next,
                            role=_tag_role(ctx),
-                           slot_role=ctx.role or ctx.used_role)
+                           slot_role=ctx.role or ctx.used_role,
+                           next_block=ctx.path_block,
+                           path_first=_path_winner(ctx, recs))
     # Halbfertiges Item aus den Komponenten erkennen (rein informativ - die
     # Empfehlung bleibt unveraendert). Ausblenden, wenn es OHNEHIN das naechste
     # empfohlene Item ist: dann zeigt der "Naechstes Item"-Block die Restkosten
@@ -973,6 +1757,9 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
         "stance_note": _stance_note(ctx.stance, ctx.weights),
         "enemy_damage_split": ctx.split,
         "enemy_cc_score": ctx.enemy_cc_score,
+        # Todes-Signal aus dem Kill-Feed (V2-08) - None, solange nichts scharf
+        # ist oder gar keine Events vorliegen (alte Dumps/Backtest/Demo).
+        "death_signal": ctx.death_signal,
         "knowledge_games": kb.get("games", 0),
         "confidence": ctx.confidence,
         "build": ctx.build.get("name") if ctx.build else None,
@@ -1095,14 +1882,16 @@ def recommend(champion: str, role: str | None, owned_names: set[str],
               weights: Weights = DEFAULT_WEIGHTS,
               champion_id: str | None = None,
               ally_gold_spent: int | None = None,
-              bot_partner: dict | None = None) -> dict:
+              bot_partner: dict | None = None,
+              death_signal: dict | None = None) -> dict:
     """Orchestrator (Struktur-Review 2026-07-17 T3, Befund S1): baut den Kontext
     auf und ruft die Phasen-Helfer in fester Reihenfolge - Core-Pick, Boots
     (KB- und Klassen-Pfad), konditionale Schichten, situatives Scoring,
     Anti-Heal, Result-Assembly. Die eigentliche Logik liegt in den _*-Helfern."""
     ctx = _build_context(champion, role, owned_names, my_scores, enemy_profiles,
                          game_time, current_gold, owned_ids, my_level, ally_items,
-                         weights, champion_id, ally_gold_spent, bot_partner)
+                         weights, champion_id, ally_gold_spent, bot_partner,
+                         death_signal)
     recs: list[dict] = []
     # 1. Naechstes Core-Item
     _core_pick(ctx, recs)
@@ -1170,7 +1959,9 @@ def _elixir_next(owned_ids: list[int], current_gold: int | None,
 def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
                game_time: float, current_gold: int | None,
                owned_ids: list[int], stance_next: bool = True,
-               role: str | None = None, slot_role: str | None = None) -> dict | None:
+               role: str | None = None, slot_role: str | None = None,
+               next_block: frozenset | set | None = None,
+               path_first: str | None = None) -> dict | None:
     """Waehlt aus den Empfehlungen den einen konkreten naechsten Kauf.
 
     Reihenfolge: bei defensiver Stance und mindestens einem fertigen Item
@@ -1184,7 +1975,14 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
     genommen - kein Vorziehen des defensiven Situationals als naechstes Item und
     keine aggressive Boots-/Core-Abweichung. So misst die Stance-Ablation die
     Schicht vollstaendig (nicht nur die drei Score-Gewichte).
+
+    Restpfad-Modus (V2-05, beide Parameter leer = altes Verhalten):
+    `next_block` sind Namen ohne Slot-Support im aktuellen Slot - sie duerfen
+    nicht `next` werden (bleiben aber in der Liste sichtbar); `path_first` ist
+    der Sieger des gemeinsamen Kandidatenpools und tritt an die Stelle, die
+    vorher das Core-Item per Vorfahrt hatte.
     """
+    blocked = next_block or frozenset()
     # Effektive Stance fuer die Reihenfolge-Sonderpfade: bei abgeschalteter
     # Schicht wie "balanced" behandeln (kein Sonderpfad).
     eff_stance = stance if stance_next else "balanced"
@@ -1196,7 +1994,11 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
         and entry[1].get("gold", {}).get("total", 0) >= 2000
         and not entry[1].get("into")
     )
-    def core_why() -> str:
+    def core_why(pick: dict) -> str:
+        if pick["kind"] != "core":
+            # Restpfad-Modus: der Pool-Sieger ist ein Situational - dann waere
+            # "Vervollstaendigt deinen Core" schlicht falsch.
+            return f"Bester Kandidat fuer deinen {completed_owned + 1}. Kauf: "
         if completed_owned == 0:
             return "Erstes fertiges Item - dein wichtigster Power-Spike: "
         return f"Vervollstaendigt deinen Core als {completed_owned + 1}. fertiges Item: "
@@ -1214,7 +2016,14 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
         # ziehen (aggressive Deviation), sonst die Faustregel.
         if eff_stance == "aggressive":
             return False
-        return completed_owned >= 1 or game_time >= 600
+        # Faustregel "Boots vor dem zweiten fertigen Item" - aber die harte
+        # 10-Minuten-Marke wird durch das GELERNTE Kauf-Timing ersetzt, wo die KB
+        # es hergibt (V2-02/V2-03: `minute.p25` = frueheres Viertel der
+        # Boots-Fertigstellungen dieses Champions). 600 s war eine Faustzahl fuer
+        # alle; ein Jhin schnuert im Median bei 11,8 min, eine Janna bei 7,4.
+        early = (boots.get("minute") or {}).get("p25")
+        limit = early * 60 if early else 600
+        return completed_owned >= 1 or game_time >= limit
 
     pick = None
     why_now = ""
@@ -1223,7 +2032,8 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
     # den defensiven Zweig / die Standard-Situational-Auswahl drankommen.
     if eff_stance == "defensive" and completed_owned >= 1:
         defensive_item = next((r for r in recs
-                               if r.get("defensive") and not r.get("antiheal")), None)
+                               if r.get("defensive") and not r.get("antiheal")
+                               and r["item"] not in blocked), None)
         if defensive_item:
             # Boots respektieren die Kaufreihenfolge auch im Defensiv-Zweig -
             # sonst wuerden sie verschluckt.
@@ -1233,7 +2043,15 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
                 pick = defensive_item
                 why_now = "Du bist oft gestorben - ein defensiver Kauf sichert ab: "
     if pick is None:
-        core = next((r for r in recs if r["kind"] == "core"), None)
+        # Hauptkandidat: im Restpfad-Modus der Pool-Sieger (Core-Status ist dort
+        # nur noch ein Prior-Bonus, keine Vorfahrt), sonst das Core-Item.
+        core = None
+        if path_first:
+            core = next((r for r in recs if r["item"] == path_first
+                         and r["item"] not in blocked), None)
+        if core is None:
+            core = next((r for r in recs if r["kind"] == "core"
+                         and r["item"] not in blocked), None)
         if core and boots:
             if boots_first(core):
                 pick, why_now = boots, ("Laut High-Elo-Kaufreihenfolge sind "
@@ -1241,13 +2059,17 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
             elif eff_stance == "aggressive" and not core.get("avg_slot"):
                 pick, why_now = core, "Du bist vorne - Damage-Spike vor Boots: "
             else:
-                pick, why_now = core, core_why()
+                pick, why_now = core, core_why(core)
         elif core:
-            pick, why_now = core, core_why()
+            pick, why_now = core, core_why(core)
         elif boots:
             pick, why_now = boots, "Dir fehlen noch Boots: "
     if pick is None:
-        pick = recs[0]
+        # Letzter Ausweg: irgendetwas muss empfohlen werden. Hat JEDER Kandidat
+        # im aktuellen Slot keinen Support, gewinnt der bestplatzierte trotzdem -
+        # eine leere Empfehlung waere fuer den Spieler wertloser als eine
+        # zeitlich untypische (und wuerde die Backtest-Stichprobe verzerren).
+        pick = next((r for r in recs if r["item"] not in blocked), recs[0])
         why_now = "Core und Boots sind komplett - staerkstes situatives Item: "
 
     entry = items.by_name().get(pick["item"])
@@ -1390,8 +2212,15 @@ def _second_next_pick(ctx: _RecContext, next_pick: dict) -> dict | None:
     # has_boots fuer das hypothetische Inventar NEU berechnen: ist das Next-Item
     # die Boots, wuerde der zweite Durchlauf mit dem stale ctx.has_boots (aus dem
     # urspruenglichen Inventar) sonst nochmal Boots empfehlen (doppelte Boots).
+    has_boots2 = any(items.is_upgraded_boots(n) for n in owned2_names)
     ctx2 = replace(ctx, owned_names=owned2_names, owned_ids=owned2_ids,
-                   has_boots=any(items.is_upgraded_boots(n) for n in owned2_names))
+                   has_boots=has_boots2,
+                   # Restpfad-Modus (V2-05): der Slot rueckt mit dem angenommenen
+                   # Kauf weiter, die Besitzmenge des next_after-Lifts auch.
+                   cur_slot=_current_slot(owned2_ids, has_boots2),
+                   slot_horizon=ctx.slot_horizon,
+                   na_owned=(_owned_completed(owned2_ids) if ctx.na_cond else []),
+                   path_scores={}, path_block=frozenset())
     recs2: list[dict] = []
     _core_pick(ctx2, recs2)
     recs2 += _boots_kb(ctx2)
@@ -1401,7 +2230,9 @@ def _second_next_pick(ctx: _RecContext, next_pick: dict) -> dict | None:
     return _pick_next(recs2, ctx2.stance, owned2_names, ctx2.game_time,
                       ctx2.current_gold, owned2_ids,
                       stance_next=ctx2.weights.stance_next, role=_tag_role(ctx2),
-                      slot_role=ctx2.role or ctx2.used_role)
+                      slot_role=ctx2.role or ctx2.used_role,
+                      next_block=ctx2.path_block,
+                      path_first=_path_winner(ctx2, recs2))
 
 
 def _purchase_plan(ctx: _RecContext, recs: list[dict], next_pick: dict | None,

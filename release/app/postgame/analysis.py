@@ -1,7 +1,7 @@
 """Delta-Engine, Lobby-Ranking, Item-Sanity und Narrativ des Post-Game-Reports.
 
 Reine Logik ohne IO/Netz (offline testbar). Grundprinzip (s.
-docu/plan_postgame.md 2.1/2.4): Massstab ist die Lobby, nicht High-Elo. Jeder
+docu/archive/plans/plan_postgame.md 2.1/2.4): Massstab ist die Lobby, nicht High-Elo. Jeder
 Team-Spieler wird mit seinem Rollen-Gegenpart (gleiche teamPosition im anderen
 Team) verglichen; Deltas werden ueber Spielphasen Early 0-10 / Mid 10-20 /
 Late 20+ auf den rollen-relevanten Metriken gebildet, ergaenzt um Kontext-Signale
@@ -290,7 +290,12 @@ TEAMFIGHT_MIN = 2               # ab so vielen entschiedenen Fights zaehlt die B
                                 # (Kipp-Punkt-Schwellen: TIP_* in Sektion 4)
 OBJECTIVE_DIFF_MIN = 2          # Elite-Differenz, ab der Objectives "praegend" sind
 TOWER_DIFF_MIN = 3              # Turm-Differenz, ab der Objectives "praegend" sind
-BUILD_HIT_LOW = 0.34           # Engine-Konformitaet <= 34 % -> Build-Ausreisser
+# Anteil der Kaeufe MIT Rueckhalt (konform + vertretbar, V2-06) <= 34 % ->
+# Build-Ausreisser. Vor V2-06 zaehlten nur die konformen Kaeufe; die Stufe
+# "vertretbar" gehoert hier bewusst dazu, weil ein statistisch belegter Kauf
+# kein Uebungsthema ist - der Befund soll nur noch bei Kaeufen ohne JEDEN
+# Rueckhalt ausloesen (Verdikt-Prinzip: kein Befund ohne echtes Problem).
+BUILD_HIT_LOW = 0.34
 VISION_DEFICIT_MIN = 8         # Ward-Aktionen-Rueckstand (Summe), ab dem markant
 
 # Antiheal-Befund (Team-Diagnose 2026-07-26, Gating verschaerft 2026-07-26b).
@@ -852,9 +857,12 @@ def _verdict_build_line(me_player: dict) -> str | None:
     if br.get("evaluable"):
         sc = br.get("score") or {}
         total, hits = sc.get("total", 0), sc.get("hits", 0)
-        if total >= 3 and hits / total <= BUILD_HIT_LOW:
-            return (f"{me_champ}: Build-Check — nur {hits} von {total} "
-                    f"Käufen engine-konform.")
+        # `ok` fehlt in Reports vor V2-06 -> 0 (dann exakt das alte Verhalten).
+        backed = hits + sc.get("ok", 0)
+        if total >= 3 and backed / total <= BUILD_HIT_LOW:
+            return (f"{me_champ}: Build-Check — {total - backed} von {total} "
+                    f"Käufen ohne statistischen Rückhalt (weder Engine-"
+                    f"Vorschlag noch in dieser Lage üblich).")
     return None
 
 

@@ -22,9 +22,30 @@ und `replay_candidates` (deterministische Kandidatenliste [next] + situationals
 aus einem recommend()-Ergebnis) - dieselbe Logik, die der Offline-Backtest nutzt;
 der Bot-Partner-Kontext (UTILITY) spiegelt `backtest._make_sample`.
 
-**Top-3-Definition:** identisch zum Backtest (`replay_candidates(result)[:3]` =
-`[next]` + `result["items"]`, dedupliziert). Ein regulaerer Fertig-Kauf ist ein
-"Hit", wenn er in diesen Top-3 liegt.
+**Top-3-Definition:** identisch zum Backtest
+(`replay_candidates(result, exclude_boots=True)[:3]` = `[next]` +
+`result["items"]`, dedupliziert, OHNE Boots-Eintraege). Ein regulaerer
+Fertig-Kauf ist ein "Hit", wenn er in diesen Top-3 liegt. Der Boots-Filter ist
+der Fix zu Befund 1 (plan_engine_v2.md): Boots belegten sonst zwei der drei
+Slots und drueckten echte Core-Items aus der Wertung.
+
+**Drei Stufen statt Hit/Miss (V2-06, plan_engine_v2.md Konzept 2):** Seit der
+Restpfad-Neubewertung (V2-05) folgt die Engine dem tatsaechlich gebauten Pfad -
+ein Kauf ausserhalb der Top-3 ist damit nicht automatisch falsch, sondern oft
+nur "die zweite uebliche Variante". Jeder regulaere Item-Kauf bekommt darum eine
+`grade`:
+
+  "hit"  (konform)     - in den Top-3 des pfad-bewussten recommend-Ergebnisses.
+  "ok"   (vertretbar)  - nicht Top-3, aber mit statistischem Rueckhalt aus der
+                         KB ("statistisches Medium", s. `_ok_reason`).
+  "miss" (Abweichung)  - weder noch.
+
+Der **Troll-Guard** ist der Kern der Stufe "vertretbar": sie wird NICHT aus der
+Neubewertung abgeleitet (die wuerde jeden Fantasie-Build absegnen), sondern
+verlangt eine eigene, konditionale KB-Evidenz FUER DIESEN Champion+Rolle -
+Slot-Support, `next_after`-Anteil oder eine `by_state`-Zelle, jeweils ueber
+kalibrierten Schwellen und konfliktfrei gegen den Besitz. Ein Item ohne jede
+solche Evidenz bleibt Abweichung.
 
 **Boots:** die Engine hat eine eigene Boots-Logik (CC-lastiges Team -> Tenacity,
 sonst AD/AP-Konter). Boots-Kaeufe werden mitbewertet, aber in einer EIGENEN
@@ -160,6 +181,141 @@ def _has_kb(cid: str, role: str) -> bool:
     return bool(bucket and knowledge.for_class(bucket, role))
 
 
+# --- Stufe "vertretbar": statistischer Rueckhalt (V2-06, Troll-Guard) --------
+#
+# Schwellen KALIBRIERT, nicht geraten (plan_engine_v2.md §7). Messung am
+# 16.15-Cache mit der Backtest-Trainings-KB (data/backtest/16.15/train/
+# builds.yaml): 100 Holdout-Matches -> 2.851 echte Item-Kaeufe (Boots
+# ausgenommen). Jeder Zustand wurde dreimal bewertet - mit dem ECHTEN Kauf, mit
+# einem ROLLENFREMDEN Item (Enchanter-Items auf Carrys, Crit-ADC-Items auf
+# Supports) und mit einem ZUFAELLIGEN fertigen SR-Item (120er-Pool, der harte
+# Troll-Guard-Test "waere jeder Fantasie-Build vertretbar?").
+#
+#   "akzeptiert" = konform + vertretbar        echt   rollenfremd   zufaellig
+#     Slot 0.05 / NA 0.05 / State n>=5        84.6 %      0.1 %       4.2 %
+#     Slot 0.08 / NA 0.08 / State n>=8        83.8 %      0.1 %       4.0 %
+#     Slot 0.10 / NA 0.10 / State n>=10       83.7 %      0.1 %       3.7 %  <-
+#     Slot 0.12 / NA 0.12 / State n>=12       82.9 %      0.1 %       3.5 %
+#     Slot 0.15 / NA 0.15 / State n>=20       81.1 %      0.1 %       3.3 %
+#     Slot 0.25 / NA 0.25 / State n>=30       78.5 %      0.1 %       3.1 %
+#   (konform allein liegt konstant bei 67.2 % echt / 2.0 % zufaellig - die
+#    Top-3-Stufe haengt nicht an diesen Schwellen, nur die mittlere Stufe.)
+#
+# Gewaehlt ist 0.10 / 0.10 / 10: der Knick der Kurve. Bis dahin kostet jede
+# Verschaerfung fast nichts an echten Kaeufen (84.6 -> 83.7 %) und drueckt die
+# Zufalls-Akzeptanz spuerbar (4.2 -> 3.7 %); danach dreht sich das Verhaeltnis
+# (0.15 kostet 2.6 Punkte echte Kaeufe fuer 0.4 Punkte weniger Zufall). Beide
+# Zielbilder sind erfuellt: echte Kaeufe landen ueberwiegend, aber NICHT
+# vollstaendig in konform+vertretbar (16 % bleiben Abweichung - der Check misst
+# also noch etwas), waehrend Fantasie-Kaeufe zu 96 % Abweichung bleiben.
+# Verteilung der Rueckhalt-Quellen bei den vertretbaren echten Kaeufen:
+# Slot-Support 76 %, by_state 16 %, next_after 8 % - alle drei tragen.
+# Mess-Skript: tmp/calib_v2_06_grades.py (ausserhalb des Repos).
+
+# Mindest-Anteil von P(Slot | Item) am AKTUELLEN Kaufslot. `slot_dist` ist
+# pipeline-seitig bereits bei n < SLOT_DIST_MIN_N (=5) gepruned - ein
+# ausgewiesener Slot hat also immer ausreichend Beobachtungen; die Schwelle
+# filtert die Rest-Slots ("bauen ein paar, ist aber nicht der Slot dafuer").
+OK_SLOT_SHARE_MIN = 0.10
+
+# Mindest-Anteil P(Kauf | zuletzt fertiges Item) im `next_after`-Bigramm. Die
+# Uebergaenge sind bei count < MIN_NEXT_AFTER (=10) geprunt - auch hier traegt
+# die Pipeline das Mindest-n, die Schwelle filtert die Ausreisser-Nachfolger.
+OK_NEXT_AFTER_MIN = 0.10
+
+# Mindest-`count` in der passenden `by_state`-Zelle (ahead/behind). Bewusst ein
+# absolutes n statt eines Anteils: die Zellen sind je Champion unterschiedlich
+# gross, und der Cutoff der Pipeline (MIN_STATE_ITEM = 5) ist fuer eine
+# "vertretbar"-Aussage zu weich.
+OK_STATE_MIN_N = 10
+
+
+def _support_kb(cid: str, role: str) -> dict:
+    """KB-Rueckhalt-Daten EINER Kombi, einmal je Spieler gelesen:
+
+        {"slot": {Item: {Slot: Anteil}},          (V2-04 `slot_dist`)
+         "na":   {Vorgaenger: {Item: Anteil}},    (T1 `next_after`, count-normiert)
+         "state": {ahead|behind: {Item: count}},  (V2-07 `by_state`)
+         "exclusive": [frozenset(2 Namen), ...]}  (V2-04 `exclusive`)
+
+    Alle vier Bloecke sind additiv: eine KB vor V2-04/V2-07 (oder eine
+    Test-Fixture) liefert leere Dicts - dann kann `_ok_reason` nie greifen und
+    die Bewertung faellt sauber auf das alte Zweistufen-Verhalten zurueck."""
+    used_role, kb = knowledge.for_champion(cid, role)
+    na: dict[str, dict[str, float]] = {}
+    for prev, succs in (kb.get("next_after") or {}).items():
+        total = sum(s.get("count", 0) for s in succs or [])
+        if total > 0:
+            na[prev] = {s["item"]: s.get("count", 0) / total for s in succs}
+    state: dict[str, dict[str, int]] = {}
+    for st, cell in (kb.get("by_state") or {}).items():
+        state[st] = {i["item"]: int(i.get("count", 0) or 0)
+                     for i in (cell.get("items") or [])}
+    return {"slot": knowledge.slot_dist(cid, used_role), "na": na,
+            "state": state,
+            "exclusive": knowledge.exclusive_pairs(cid, used_role)}
+
+
+def _blocked(name: str, sup: dict, owned_names: set) -> bool:
+    """Kollidiert der Kauf mit dem Besitz? Geteilte Passive (`items.conflicts`)
+    ODER ein gelerntes Exklusiv-Paar (V2-04). Ein solcher Kauf ist NIE
+    'vertretbar' - er ist der klarste Fall einer echten Abweichung."""
+    if app_items.conflicts(name, owned_names):
+        return True
+    return any(name in pair and (pair - {name}) & owned_names
+               for pair in sup.get("exclusive") or [])
+
+
+def _ok_reason(name: str, sup: dict, *, cur_slot: int, prev_item: str | None,
+               gold_state: str | None, owned_names: set) -> str | None:
+    """Grund-Text des statistischen Rueckhalts ("vertretbar") oder None.
+
+    Drei gleichrangige Quellen, in dieser Reihenfolge geprueft (die erste, die
+    traegt, liefert den Text):
+      1. Slot-Support: so viele Spieler kaufen das Item genau an dieser Stelle.
+      2. `next_after`: es folgt haeufig auf das zuletzt fertige Item.
+      3. `by_state`: es wird in genau dieser Gold-Lage haeufig gekauft.
+    Vorgeschaltet der harte Konflikt-Ausschluss (`_blocked`)."""
+    if _blocked(name, sup, owned_names):
+        return None
+    share = (sup.get("slot") or {}).get(name, {}).get(cur_slot)
+    if share is not None and share >= OK_SLOT_SHARE_MIN:
+        return f"Slot-üblich ({share:.0%} als {cur_slot}. Item)"
+    if prev_item:
+        na = (sup.get("na") or {}).get(prev_item, {}).get(name)
+        if na is not None and na >= OK_NEXT_AFTER_MIN:
+            return f"folgt oft auf {prev_item} ({na:.0%})"
+    if gold_state:
+        cnt = (sup.get("state") or {}).get(gold_state, {}).get(name)
+        if cnt is not None and cnt >= OK_STATE_MIN_N:
+            # Der Rueckhalt-Text nennt die QUELLE zuerst ("Behind-Rueckhalt"),
+            # damit im Report auf einen Blick lesbar ist, dass dieser Kauf
+            # situativ begruendet war - und nicht nur "irgendwie statistisch
+            # gestuetzt" (V2-08, Teil C).
+            lage = "hinten" if gold_state == "behind" else "vorne"
+            label = "Behind" if gold_state == "behind" else "Ahead"
+            return f"{label}-Rückhalt: üblich, wenn du {lage} liegst (n={cnt})"
+    return None
+
+
+def _gold_state(owned_ids: list, used_role: str, enemies: list) -> str | None:
+    """'ahead' | 'behind' | None - dieselbe Rechnung wie `recommend`
+    (`fielded_lead` -> `earned_lead` -> STATE_LEAD_GOLD), damit die
+    `by_state`-Zellen unter derselben Definition abgefragt werden, unter der sie
+    gezaehlt wurden. `current_gold` ist im Replay unbekannt (None) - genau wie
+    im Offline-Backtest."""
+    my_gold = app_items.categorize_gold(owned_ids)["gold_total"]
+    _lead, opp = rec.fielded_lead(my_gold, used_role, enemies)
+    e_lead = rec.earned_lead(my_gold, None, opp)
+    if e_lead is None:
+        return None
+    if e_lead >= rec.STATE_LEAD_GOLD:
+        return "ahead"
+    if e_lead <= -rec.STATE_LEAD_GOLD:
+        return "behind"
+    return None
+
+
 # --- Haupt-Auswertung je Spieler --------------------------------------------
 
 def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
@@ -167,9 +323,14 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
     """Engine-Replay-Auswertung fuer EINEN Team-Spieler.
 
     Rueckgabe bei bewertbarem Spieler:
-      {evaluable: True, score:{hits,total}, boots:{hits,total},
-       purchases:[{minute,item,kind,hit,engine_top:[...]}, ...]}
+      {evaluable: True, score:{hits,ok,total}, boots:{hits,total},
+       purchases:[{minute,item,kind,hit,grade,ok_reason,engine_top:[...]}, ...]}
     Sonst: {evaluable: False, reason: "..."}.
+
+    `score.hits` bleibt die Zahl der KONFORMEN Kaeufe (Top-3) - Semantik
+    unveraendert gegenueber der Zweistufen-Version, damit persistierte Trend-
+    Records vergleichbar bleiben. `score.ok` ist der neue Zaehler der
+    vertretbaren Kaeufe (V2-06); `total - hits - ok` sind die Abweichungen.
 
     `core_by_pid`: {pid: [Core-Item-Namen]} (fuer die Fertig-Erkennung; auch die
     Gegner-Cores werden hier nur zur Item-Klassifikation gebraucht - der Engine-
@@ -195,8 +356,17 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
     ally_pids = [q for q, qi in ranked_names.items()
                  if qi.get("team") == my_team and q != pid]
 
+    # KB-Rueckhalt der Kombi einmal lesen (Stufe "vertretbar", V2-06). Die
+    # verwendete Rolle stammt aus derselben Aufloesung wie in `recommend`.
+    used_role, _kb = knowledge.for_champion(cid, role)
+    sup = _support_kb(cid, role)
+
     purchases = []
-    hits = total = bhits = btotal = 0
+    hits = oks = total = bhits = btotal = 0
+    # Zuletzt FERTIG gekauftes regulaeres Item (Boots zaehlen im `next_after`-
+    # Bigramm nicht mit, s. aggregate._next_after_pairs) - der Vorgaenger, gegen
+    # den der Uebergangs-Rueckhalt geprueft wird.
+    prev_item: str | None = None
     seen: set = set()
     for m, cur in enumerate(items_ts):
         for iid in (cur or []):
@@ -238,9 +408,13 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
                 owned_ids=owned_ids, my_level=my_level,
                 ally_items=set(ally_items), weights=w, bot_partner=bot_partner)
 
+            reason = None
             if kind == "boots":
                 # Boots gegen die EIGENE Boots-Logik der Engine messen (eigene
-                # Teilmenge) - unabhaengig von den allgemeinen Top-3.
+                # Teilmenge) - unabhaengig von den allgemeinen Top-3. Die drei
+                # Stufen gelten bewusst NUR fuer regulaere Item-Kaeufe: die
+                # KB-Rueckhalt-Bloecke (slot_dist/next_after/by_state) sind
+                # boots-frei, ein "vertretbar" waere hier nicht belegbar.
                 engine_boots = [r["item"] for r in result.get("items", [])
                                 if r.get("kind") == "boots"]
                 nxt = result.get("next")
@@ -250,21 +424,43 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
                 btotal += 1
                 bhits += int(hit)
                 top = engine_boots[:3]
+                grade = "hit" if hit else "miss"
             else:
                 nxt = result.get("next")
                 if not (nxt and nxt.get("item")):
                     # Engine hat fuer diesen Zustand nichts zu sagen (Build
                     # komplett / nur Elixier) -> nicht wertbar, ueberspringen.
                     continue
-                cands = replay_candidates(result)
+                # exclude_boots=True: Boots-Vorschlaege duerfen die Item-Top-3
+                # nicht mitbelegen (sie werden im boots-Zweig separat gemessen).
+                cands = replay_candidates(result, exclude_boots=True)
                 top = cands[:3]
                 hit = name in top
                 total += 1
                 hits += int(hit)
+                if hit:
+                    grade = "hit"
+                else:
+                    # Troll-Guard: nicht die Neubewertung entscheidet, sondern
+                    # eigene konditionale KB-Evidenz fuer diesen Kauf.
+                    has_boots = any(app_items.is_upgraded_boots(n)
+                                    for n in owned_names)
+                    # Kaufslot des laufenden Kaufs - Train-Definition wie
+                    # recommend._current_slot (Boots zaehlen als Slot mit).
+                    cur_slot = (app_items.count_completed(owned_ids)
+                                + (1 if has_boots else 0) + 1)
+                    reason = _ok_reason(
+                        name, sup, cur_slot=cur_slot, prev_item=prev_item,
+                        gold_state=_gold_state(owned_ids, used_role, enemies),
+                        owned_names=owned_names)
+                    grade = "ok" if reason else "miss"
+                    oks += int(bool(reason))
+                prev_item = name
             purchases.append({"minute": m, "item": name, "kind": kind,
-                              "hit": hit, "engine_top": top})
+                              "hit": hit, "grade": grade, "ok_reason": reason,
+                              "engine_top": top})
 
     return {"evaluable": True,
-            "score": {"hits": hits, "total": total},
+            "score": {"hits": hits, "ok": oks, "total": total},
             "boots": {"hits": bhits, "total": btotal},
             "purchases": purchases}
