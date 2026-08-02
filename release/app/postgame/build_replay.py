@@ -36,8 +36,9 @@ nur "die zweite uebliche Variante". Jeder regulaere Item-Kauf bekommt darum eine
 `grade`:
 
   "hit"  (konform)     - in den Top-3 des pfad-bewussten recommend-Ergebnisses.
-  "ok"   (vertretbar)  - nicht Top-3, aber mit statistischem Rueckhalt aus der
-                         KB ("statistisches Medium", s. `_ok_reason`).
+  "ok"   (vertretbar)  - nicht Top-3, aber mit eigenem Rueckhalt: Core-Item der
+                         Kombi, frueherer Engine-Vorschlag oder KB-Statistik
+                         ("statistisches Medium") - Rangfolge s. unten.
   "miss" (Abweichung)  - weder noch.
 
 Der **Troll-Guard** ist der Kern der Stufe "vertretbar": sie wird NICHT aus der
@@ -47,10 +48,60 @@ Slot-Support, `next_after`-Anteil oder eine `by_state`-Zelle, jeweils ueber
 kalibrierten Schwellen und konfliktfrei gegen den Besitz. Ein Item ohne jede
 solche Evidenz bleibt Abweichung.
 
+**Rueckhalt-Quellen in fester Rangfolge.** Ein empirischer Review ueber zehn
+echte Matches hat gezeigt, dass die urspruenglichen drei KB-Quellen die
+REIHENFOLGE mitbewerten, obwohl nur die Item-WAHL gemessen werden soll. Darum
+sind zwei Quellen vorgeschaltet:
+
+  0. `_blocked` - Kollision mit dem Besitz (geteilte Passive oder gelerntes
+     Exklusiv-Paar). Vorrangig vor allem anderen: so ein Kauf bleibt Abweichung,
+     auch wenn ihn jede andere Quelle tragen wuerde.
+  1. **Core-Item** (`_core_names`) - das Item steht im Core der Kombi: im
+     globalen Core des KB-Eintrags ODER im Core irgendeines Archetyps
+     (`builds`), denn wer auf Archetyp 2 spielt, baut dessen Core. Realfall:
+     Varus TOP kaufte sein Core-Item #2 ("Dusk and Dawn") als ERSTES - die
+     Engine will an Slot 1 Core #1, also war der Kauf "miss", obwohl er
+     buchstaeblich zum Build gehoert. Abweichend ist nur die Reihenfolge.
+  2. **Top-3-Gedaechtnis** - das Item stand bei einem FRUEHEREN Kauf desselben
+     Spielers selbst in den Engine-Top-3. Realfall: Hwei BOTTOM - Shadowflame
+     lag bei Min 24/32/40 in der Empfehlung; der Kauf bei Min 46 wurde "miss",
+     weil ein Off-KB-Zwischenkauf (Jak'Sho) die `next_after`-Kette riss und
+     `slot_dist` fuer spaete Slots geprunt ist. Was die Engine selbst wollte,
+     ist nicht dadurch falsch, dass es spaeter kam.
+  3.-5. die kalibrierten KB-Quellen aus `_ok_reason` (Slot-Support,
+     `next_after`, `by_state`) - unveraendert der harte Troll-Guard.
+
+Der `next_after`-Check nimmt dabei nicht stur das zuletzt gekaufte Item als
+Vorgaenger, sondern den JUENGSTEN Vorgaenger, den die KB ueberhaupt kennt
+(Backoff ueber die Kaufhistorie). Sonst reisst ein einziger Off-KB-Zwischenkauf
+den Uebergangs-Rueckhalt fuer alle Folgekaeufe ab, obwohl die KB fuer den
+vorletzten Kauf Daten haette.
+
+`score.hits` bleibt exakt "Anzahl Kaeufe in Top-3" (damit persistierte
+Trend-Records vergleichbar bleiben) - die Quellen 1 und 2 erhoehen nur
+`score.ok`.
+
 **Boots:** die Engine hat eine eigene Boots-Logik (CC-lastiges Team -> Tenacity,
 sonst AD/AP-Konter). Boots-Kaeufe werden mitbewertet, aber in einer EIGENEN
 Teilmenge gezaehlt (gegen die Boots-Kandidaten der Engine, nicht die allgemeinen
-Top-3) - so entscheidet ein Mercs-vs-Steelcaps-Streit nicht ueber den Item-Score.
+Top-3) - so entscheidet ein Mercs-vs-Steelcaps-Streit nicht ueber den
+Item-Score. Zwei Korrekturen aus demselben Review:
+
+  * Gibt die Engine im Vor-Kauf-Zustand GAR KEINE Boots-Empfehlung ab, wird der
+    Kauf nicht gewertet (kein `btotal`-Inkrement, kein purchases-Eintrag) -
+    analog zum Item-Fall "Engine hat nichts zu sagen". Genau das passiert beim
+    ZWEITEN T2-Boots-Paar (Verkauf/Umbau; real: Renekton Mercs Min 12 ->
+    Steelcaps Min 27): wer schon Boots traegt, bekommt keine vorgeschlagen - der
+    Kauf waere sonst automatisch "miss" gegen eine LEERE Alternative
+    ("-> Engine: -"), also gegen gar keine Aussage.
+  * Gemessen wird gegen "die ueblichen Boots laut Statistik", nicht gegen die
+    Engine-Top-1: ein Boots-Kauf ist auch dann konform, wenn er in den KB-Boots
+    der Kombi mit `pick_rate >= BOOTS_OK_PICK_MIN` steht. Die Engine fieldet oft
+    nur ein bis zwei Boots-Eintraege (Hauptvorschlag + Alternative); real fiel
+    damit Renektons Mercury's Treads durch, obwohl 30 % der Renektons sie bauen.
+    Ohne Boots-Block in der KB bleibt es bei der reinen Engine-Liste
+    (Code-Fallback bei duenner Datenlage). Die Anzeige `engine_top` ist
+    unveraendert die Engine-Liste - sie zeigt, was die Engine gesagt haette.
 
 Kein KB-Wissen fuer Champion+Rolle UND kein Klassen-Fallback -> der Spieler wird
 sauber als "nicht bewertbar" markiert (kein Raten). Fehlt der Data-Dragon-Static-
@@ -218,9 +269,10 @@ def _has_kb(cid: str, role: str) -> bool:
 # filtert die Rest-Slots ("bauen ein paar, ist aber nicht der Slot dafuer").
 OK_SLOT_SHARE_MIN = 0.10
 
-# Mindest-Anteil P(Kauf | zuletzt fertiges Item) im `next_after`-Bigramm. Die
+# Mindest-Anteil P(Kauf | frueher fertiges Item) im `next_after`-Bigramm. Die
 # Uebergaenge sind bei count < MIN_NEXT_AFTER (=10) geprunt - auch hier traegt
 # die Pipeline das Mindest-n, die Schwelle filtert die Ausreisser-Nachfolger.
+# Der Vorgaenger ist nicht zwingend der letzte Kauf, s. `_na_predecessor`.
 OK_NEXT_AFTER_MIN = 0.10
 
 # Mindest-`count` in der passenden `by_state`-Zelle (ahead/behind). Bewusst ein
@@ -228,6 +280,54 @@ OK_NEXT_AFTER_MIN = 0.10
 # gross, und der Cutoff der Pipeline (MIN_STATE_ITEM = 5) ist fuer eine
 # "vertretbar"-Aussage zu weich.
 OK_STATE_MIN_N = 10
+
+# Mindest-`pick_rate` eines KB-Boots-Eintrags, ab dem der Kauf als konform
+# zaehlt - auch wenn die Engine gerade ein anderes Paar vorschlaegt. Die Messlatte
+# der Boots-Quote ist damit "die ueblichen Boots dieser Kombi laut Statistik" und
+# nicht "die Engine-Top-1": die Boots-Empfehlung fieldet oft nur ein bis zwei
+# Eintraege, und ein Mercs-vs-Steelcaps-Streit ist keine Fehlentscheidung des
+# Spielers. Der Wert liegt bewusst auf derselben 10-%-Linie wie
+# OK_SLOT_SHARE_MIN/OK_NEXT_AFTER_MIN: dort trennt die Verteilung "bauen ein
+# paar" von "ist eine der ueblichen Varianten".
+BOOTS_OK_PICK_MIN = 0.10
+
+
+def _core_names(cid: str, role: str) -> set[str]:
+    """Alle Core-Item-Namen der Kombi laut KB (Rueckhalt-Quelle 1).
+
+    Vereinigung aus dem globalen `core` des Eintrags UND dem `core` JEDES
+    Archetyps in `builds`: wer auf Archetyp 2 spielt, baut dessen Core, und die
+    Bewertung darf ihn nicht gegen den Standard-Core messen. Leere Menge, wenn
+    die Kombi unbekannt ist - dann kann die Quelle schlicht nie greifen."""
+    _used_role, kb = knowledge.for_champion(cid, role)
+    blocks = [kb.get("core") or []]
+    blocks += [(b.get("core") or []) for b in (kb.get("builds") or [])
+               if isinstance(b, dict)]
+    out: set[str] = set()
+    for block in blocks:
+        for it in block or []:
+            name = it.get("item") if isinstance(it, dict) else it
+            if name:
+                out.add(str(name))
+    return out
+
+
+def _kb_boots(cid: str, role: str) -> dict[str, float]:
+    """Boots-Name -> `pick_rate` aus dem `boots`-Block der Kombi.
+
+    Grundlage der Boots-Wertung gegen "die ueblichen Boots" statt gegen die
+    Engine-Top-1. Leeres Dict fuer unbekannte Kombis und fuer KBs/Fixtures ohne
+    Boots-Block - dann faellt die Wertung auf die reine Engine-Liste zurueck."""
+    _used_role, kb = knowledge.for_champion(cid, role)
+    out: dict[str, float] = {}
+    for b in kb.get("boots") or []:
+        if not isinstance(b, dict) or not b.get("item"):
+            continue
+        try:
+            out[str(b["item"])] = float(b.get("pick_rate") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _support_kb(cid: str, role: str) -> dict:
@@ -266,21 +366,44 @@ def _blocked(name: str, sup: dict, owned_names: set) -> bool:
                for pair in sup.get("exclusive") or [])
 
 
-def _ok_reason(name: str, sup: dict, *, cur_slot: int, prev_item: str | None,
+def _na_predecessor(sup: dict, prev_items) -> str | None:
+    """Der JUENGSTE bisher gekaufte Vorgaenger, den das `next_after`-Bigramm der
+    Kombi ueberhaupt als Key kennt - oder None.
+
+    Backoff statt "nur das zuletzt gekaufte Item": ein einziger Off-KB-Kauf
+    (ein Item, das diese Kombi in der KB nie baut) hat sonst den
+    Uebergangs-Rueckhalt fuer ALLE Folgekaeufe gekappt, obwohl die KB fuer den
+    vorletzten Kauf sehr wohl Daten hat. Uebersprungen werden nur unbekannte
+    Vorgaenger - der erste bekannte gewinnt, auch wenn er den konkreten
+    Nachfolger nicht traegt (sonst wuerde die Suche so lange zurueckwandern, bis
+    irgendein alter Kauf passt, und das waere kein Uebergangs-Beleg mehr)."""
+    na = sup.get("na") or {}
+    for prev in reversed(list(prev_items or [])):
+        if prev in na:
+            return prev
+    return None
+
+
+def _ok_reason(name: str, sup: dict, *, cur_slot: int, prev_items,
                gold_state: str | None, owned_names: set) -> str | None:
     """Grund-Text des statistischen Rueckhalts ("vertretbar") oder None.
 
     Drei gleichrangige Quellen, in dieser Reihenfolge geprueft (die erste, die
     traegt, liefert den Text):
       1. Slot-Support: so viele Spieler kaufen das Item genau an dieser Stelle.
-      2. `next_after`: es folgt haeufig auf das zuletzt fertige Item.
+      2. `next_after`: es folgt haeufig auf ein frueher fertiges Item
+         (Vorgaenger-Wahl s. `_na_predecessor`).
       3. `by_state`: es wird in genau dieser Gold-Lage haeufig gekauft.
-    Vorgeschaltet der harte Konflikt-Ausschluss (`_blocked`)."""
+    Vorgeschaltet der harte Konflikt-Ausschluss (`_blocked`).
+
+    `prev_items` ist die chronologische Liste der bisher gekauften regulaeren
+    Fertig-Items (Boots zaehlen im Bigramm nicht mit)."""
     if _blocked(name, sup, owned_names):
         return None
     share = (sup.get("slot") or {}).get(name, {}).get(cur_slot)
     if share is not None and share >= OK_SLOT_SHARE_MIN:
         return f"Slot-üblich ({share:.0%} als {cur_slot}. Item)"
+    prev_item = _na_predecessor(sup, prev_items)
     if prev_item:
         na = (sup.get("na") or {}).get(prev_item, {}).get(name)
         if na is not None and na >= OK_NEXT_AFTER_MIN:
@@ -329,12 +452,16 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
 
     `score.hits` bleibt die Zahl der KONFORMEN Kaeufe (Top-3) - Semantik
     unveraendert gegenueber der Zweistufen-Version, damit persistierte Trend-
-    Records vergleichbar bleiben. `score.ok` ist der neue Zaehler der
-    vertretbaren Kaeufe (V2-06); `total - hits - ok` sind die Abweichungen.
+    Records vergleichbar bleiben. `score.ok` ist der Zaehler der vertretbaren
+    Kaeufe (V2-06, Quellen s. Modul-Docstring); `total - hits - ok` sind die
+    Abweichungen. `boots.total` zaehlt nur Boots-Kaeufe, zu denen die Engine
+    ueberhaupt eine Empfehlung hatte.
 
     `core_by_pid`: {pid: [Core-Item-Namen]} (fuer die Fertig-Erkennung; auch die
     Gegner-Cores werden hier nur zur Item-Klassifikation gebraucht - der Engine-
-    Input selbst kommt aus dem rekonstruierten Zustand)."""
+    Input selbst kommt aus dem rekonstruierten Zustand). Nicht zu verwechseln
+    mit `_core_names`: das liest den Core AUS DER KB und ist die
+    Rueckhalt-Quelle 1 der Wertung."""
     info = ranked_names.get(pid, {})
     champ = info.get("champ") or ""
     role = info.get("role") or ""
@@ -360,13 +487,20 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
     # verwendete Rolle stammt aus derselben Aufloesung wie in `recommend`.
     used_role, _kb = knowledge.for_champion(cid, role)
     sup = _support_kb(cid, role)
+    # Core-Namen (Rueckhalt-Quelle 1) und KB-Boots (Boots-Wertung) einmal je
+    # Spieler lesen - beide sind ueber den ganzen Kauf-Loop konstant.
+    kb_core = _core_names(cid, role)
+    kb_boots = _kb_boots(cid, role)
 
     purchases = []
     hits = oks = total = bhits = btotal = 0
-    # Zuletzt FERTIG gekauftes regulaeres Item (Boots zaehlen im `next_after`-
-    # Bigramm nicht mit, s. aggregate._next_after_pairs) - der Vorgaenger, gegen
-    # den der Uebergangs-Rueckhalt geprueft wird.
-    prev_item: str | None = None
+    # Chronologische Liste der bisher FERTIG gekauften regulaeren Items (Boots
+    # zaehlen im `next_after`-Bigramm nicht mit, s. aggregate._next_after_pairs).
+    # Der Uebergangs-Rueckhalt sucht darin den juengsten KB-bekannten Vorgaenger.
+    prev_items: list[str] = []
+    # Top-3-Gedaechtnis (Rueckhalt-Quelle 2): Item-Name -> letzte Minute, in der
+    # die Engine es diesem Spieler selbst empfohlen hat.
+    top3_seen: dict[str, int] = {}
     seen: set = set()
     for m, cur in enumerate(items_ts):
         for iid in (cur or []):
@@ -408,19 +542,34 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
                 owned_ids=owned_ids, my_level=my_level,
                 ally_items=set(ally_items), weights=w, bot_partner=bot_partner)
 
+            # Item-Top-3 dieses Zustands - Bewertungsmassstab der regulaeren
+            # Kaeufe UND Futter des Top-3-Gedaechtnisses (auch an
+            # Boots-Zeitpunkten: was die Engine dort empfiehlt, hat sie diesem
+            # Spieler gesagt, egal was er gerade kauft).
+            item_top3 = replay_candidates(result, exclude_boots=True)[:3]
+
             reason = None
             if kind == "boots":
                 # Boots gegen die EIGENE Boots-Logik der Engine messen (eigene
                 # Teilmenge) - unabhaengig von den allgemeinen Top-3. Die drei
-                # Stufen gelten bewusst NUR fuer regulaere Item-Kaeufe: die
-                # KB-Rueckhalt-Bloecke (slot_dist/next_after/by_state) sind
+                # KB-Stufen gelten bewusst NUR fuer regulaere Item-Kaeufe: die
+                # Rueckhalt-Bloecke (slot_dist/next_after/by_state) sind
                 # boots-frei, ein "vertretbar" waere hier nicht belegbar.
                 engine_boots = [r["item"] for r in result.get("items", [])
                                 if r.get("kind") == "boots"]
                 nxt = result.get("next")
                 if nxt and nxt.get("kind") == "boots" and nxt["item"] not in engine_boots:
                     engine_boots.insert(0, nxt["item"])
-                hit = name in engine_boots
+                if not engine_boots:
+                    # Die Engine sagt zu Boots nichts (typisch: der Spieler
+                    # traegt im Vor-Kauf-Zustand schon T2-Boots und kauft ein
+                    # zweites Paar). Ohne Aussage gibt es nichts zu messen ->
+                    # gar nicht werten statt "miss gegen Leere".
+                    continue
+                # Konform ist der Kauf gegen die Engine-Vorschlaege ODER gegen
+                # die ueblichen Boots der Kombi laut KB (s. BOOTS_OK_PICK_MIN).
+                hit = (name in engine_boots
+                       or kb_boots.get(name, 0.0) >= BOOTS_OK_PICK_MIN)
                 btotal += 1
                 bhits += int(hit)
                 top = engine_boots[:3]
@@ -433,8 +582,7 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
                     continue
                 # exclude_boots=True: Boots-Vorschlaege duerfen die Item-Top-3
                 # nicht mitbelegen (sie werden im boots-Zweig separat gemessen).
-                cands = replay_candidates(result, exclude_boots=True)
-                top = cands[:3]
+                top = item_top3
                 hit = name in top
                 total += 1
                 hits += int(hit)
@@ -442,20 +590,34 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
                     grade = "hit"
                 else:
                     # Troll-Guard: nicht die Neubewertung entscheidet, sondern
-                    # eigene konditionale KB-Evidenz fuer diesen Kauf.
+                    # eigene Evidenz fuer diesen Kauf. Rangfolge s. Modul-
+                    # Docstring - der Konflikt-Ausschluss steht ueber allem.
                     has_boots = any(app_items.is_upgraded_boots(n)
                                     for n in owned_names)
                     # Kaufslot des laufenden Kaufs - Train-Definition wie
                     # recommend._current_slot (Boots zaehlen als Slot mit).
                     cur_slot = (app_items.count_completed(owned_ids)
                                 + (1 if has_boots else 0) + 1)
-                    reason = _ok_reason(
-                        name, sup, cur_slot=cur_slot, prev_item=prev_item,
-                        gold_state=_gold_state(owned_ids, used_role, enemies),
-                        owned_names=owned_names)
+                    if _blocked(name, sup, owned_names):
+                        reason = None
+                    elif name in kb_core:
+                        reason = (f"Core-Item für {champ} {used_role or role} – "
+                                  f"nur die Reihenfolge weicht ab")
+                    elif name in top3_seen:
+                        reason = (f"stand bei Min {top3_seen[name]} selbst in "
+                                  f"der Engine-Top-3 – nur später gekauft")
+                    else:
+                        reason = _ok_reason(
+                            name, sup, cur_slot=cur_slot, prev_items=prev_items,
+                            gold_state=_gold_state(owned_ids, used_role, enemies),
+                            owned_names=owned_names)
                     grade = "ok" if reason else "miss"
                     oks += int(bool(reason))
-                prev_item = name
+                prev_items.append(name)
+            # Nach der Wertung merken, was die Engine hier empfohlen hat - ein
+            # spaeterer Kauf aus dieser Liste ist dann kein blinder Griff mehr.
+            for cand in item_top3:
+                top3_seen[cand] = m
             purchases.append({"minute": m, "item": name, "kind": kind,
                               "hit": hit, "grade": grade, "ok_reason": reason,
                               "engine_top": top})

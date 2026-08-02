@@ -110,8 +110,8 @@ class Weights:
     #          Slot-Support-Filter).
     #   >0.0 = gemeinsamer Kandidatenpool (restliche Core + Situationals): der
     #          Slot-Support P(Slot|Item) am aktuellen Slot daempft den Basisterm,
-    #          Items ohne Support am aktuellen ODER einem spaeteren Slot fallen
-    #          raus, Core-Status ist nur noch ein Prior-Bonus. Der Faktor daempft
+    #          Items ohne Support am aktuellen Slot sind als `next` gesperrt,
+    #          Core-Status ist nur noch ein Prior-Bonus. Der Faktor daempft
     #          die Slot-Gewichtung linear Richtung neutral (1.0 = voll).
     # Wert 0.6 aus dem V2-05-Gate (Offline-Backtest 16.15, Holdout 5275 Matches,
     # 38.340 Samples, Sweep 0/0,4/0,6/0,8/1,0 auf identischer Trainings-KB):
@@ -132,6 +132,16 @@ class Weights:
     # Shyvana JUNGLE 70,2 % -> 69,6 % (-0,6 pp, innerhalb der Gate-Toleranz).
     path_rescore_factor: float = 0.6
     path_core_bonus: float = 0.15     # Prior-Bonus fuer Core-Status im Pool
+    # Was passiert mit einem Item, dessen `slot_dist` VOR dem aktuellen Kaufslot
+    # endet (mehr als SLOT_LATE_TOLERANCE dahinter)? False (Default): Hard-Drop
+    # aus dem Kandidatenpool (V2-05). True: es bleibt Kandidat, maximal
+    # gedaempft und als `next` gesperrt - nur noch als Experiment-/Ablations-
+    # Schalter erhalten, weil der Backtest den Hard-Drop bestaetigt hat
+    # (report-sweep-slot_late_keep.yaml: True kostet 0,3 pp Hit@3 gesamt und
+    # 0,7 pp ab dem 3. Kauf). Bewusst ein Bool und kein Gewicht - die Frage ist
+    # "Datenluecke oder Aussage?", keine Feinjustierung. Ausfuehrliche
+    # Begruendung am Fundort in `_slot_support`.
+    slot_late_keep: bool = False
     # Gelernte Exklusiv-Paare (V2-04, `exclusive` in der KB) als HARTER
     # Kandidaten-Ausschluss zusaetzlich zu items.conflicts. Bewusst ein Bool und
     # kein Score-Gewicht: das ist eine Korrektheitsregel ("die beiden baut
@@ -679,7 +689,12 @@ def _slot_support(ctx: _RecContext, name: str,
     Bewusst NEUTRAL (Faktor 1.0, Support ja) bleibt der Fall, dass der aktuelle
     Slot jenseits des Datenhorizonts der Kombi liegt (`slot_horizon`): dort kappt
     die Pruning-Schwelle der Pipeline jede Aussage, und ein fehlendes Datum darf
-    nie ein Item ausschliessen (auch alte KBs ohne das Feld landen hier)."""
+    nie ein Item ausschliessen (auch alte KBs ohne das Feld landen hier).
+
+    Der dritte Rueckgabewert ("Support jetzt oder spaeter?") ist im Default
+    False, sobald der aktuelle Slot hinter dem Datenende des Items liegt - der
+    Aufrufer wirft das Item dann aus dem Pool. Begruendung unten an der
+    Stelle."""
     if ctx.cur_slot > ctx.slot_horizon:
         return 1.0, True, True
     f = ctx.weights.path_rescore_factor
@@ -692,8 +707,49 @@ def _slot_support(ctx: _RecContext, name: str,
         return 1.0 + f * (fit - 1.0), True, True
     peak = max(dist.values()) or 1.0
     now = dist.get(ctx.cur_slot, 0.0)
-    later = ctx.cur_slot <= max(dist) + SLOT_LATE_TOLERANCE
-    return 1.0 + f * (now / peak - 1.0), now > 0, later
+    mult = 1.0 + f * (now / peak - 1.0)
+    if ctx.cur_slot > max(dist) + SLOT_LATE_TOLERANCE:
+        # Jenseits des ITEM-eigenen Datenendes. `now` ist hier per Konstruktion
+        # 0, `mult` also schon die maximale Daempfung; die einzige Frage ist, ob
+        # das Item noch Kandidat bleibt (`slot_late_keep`).
+        #
+        # Default ist RAUS (Hard-Drop), und zwar per Backtest entschieden. Die
+        # Gegenthese war gut motiviert: das fehlende Datum ist Rechtszensierung
+        # und keine Evidenz "wird so spaet nie gebaut" - die Pipeline prunet
+        # Slots mit n < SLOT_DIST_MIN_N, und lange Spiele sind selten, je
+        # spaeter der Slot desto sicherer faellt er unter die Schwelle.
+        # Realfall aus dem 10-Matches-Review: Hwei BOTTOM, 57 Minuten.
+        # Shadowflame ist dort Core-Item #3 (43 % Pick, n=128), seine
+        # `slot_dist` endet aber bei Slot 4, weil in Hweis ganzer Kombi nur 3
+        # von 12 Items ueberhaupt Slot-6-Eintraege haben. Beim 6. Kaufslot
+        # fliegt Shadowflame aus dem Pool und die Engine empfiehlt Seraph's
+        # Embrace (6 % Pick).
+        #
+        # Gemessen hat sich das trotzdem nicht gerechnet
+        # (data/backtest/16.15/report-sweep-slot_late_keep.yaml, 76 313
+        # Samples, alle KB-Kombis): mit `slot_late_keep=True` faellt Hit@3
+        # gesamt von 68,9 % auf 68,6 % (-0,3 pp) und ab dem 3. Kauf - dem
+        # Zielfall - von 64,4 % auf 63,7 % (-0,7 pp); Hit@1 -0,1 pp, Boots
+        # unveraendert. Im Per-Kombi-Gate (n >= 50) verlieren 44 Kombis mehr
+        # als 1 pp (Spitze Xerath UTILITY -4,7 pp), nur 4 gewinnen mehr als
+        # 1 pp. Der Hwei-Fall ist real, aber selten - die gedaempften Spaet-
+        # Kandidaten verdraengen im Mittel oefter einen richtigen Vorschlag,
+        # als sie einen retten. Er wird ausserdem nachgelagert abgefedert: die
+        # Post-Game-Wertung zieht ihr Gedaechtnis aus dem Core der KB und den
+        # frueheren Top-3-Listen (`_core_names` / `top3_seen` in
+        # app/postgame/build_replay.py) und wertet so einen spaeten
+        # Core-Item-Kauf weiter als konform, auch wenn die Live-Engine ihn im
+        # Moment des Kaufs nicht mehr auf der Liste hatte. `slot_late_keep`
+        # bleibt als Experiment-/Ablations-Schalter erhalten, damit ein
+        # kuenftiger Sweep die Frage mit neuen Daten neu stellen kann.
+        #
+        # Die V2-05-Absicherung bleibt trotzdem stehen: now_ok=False setzt den
+        # Namen beim Aufrufer auf `path_block`, damit kann das Item sichtbar
+        # bleiben, aber nie `next` werden. Genau daran haengt der Jhin/Collector-
+        # Fall ("uebersprungenes Core-Item wird nicht stur weiterempfohlen") -
+        # der wird vom Block getragen, nicht vom Rauswurf.
+        return mult, False, ctx.weights.slot_late_keep
+    return mult, now > 0, True
 
 
 def _learned_conflict(ctx: _RecContext, name: str) -> bool:
@@ -730,8 +786,8 @@ def _core_pick(ctx: _RecContext, recs: list[dict]) -> None:
 
     Legacy-Modus (path_rescore_factor == 0): das erste noch fehlende Core-Item in
     gelernter Kaufreihenfolge. Restpfad-Modus (V2-05): das Core-Item mit dem
-    besten Pool-Score, Items ohne Slot-Support ab dem aktuellen Slot fallen ganz
-    raus. Haengt hoechstens ein Core-Item an recs."""
+    besten Pool-Score, Items ohne Slot-Support im aktuellen Slot sind als `next`
+    gesperrt. Haengt hoechstens ein Core-Item an recs."""
     if ctx.weights.path_rescore_factor > 0.0:
         _core_pick_path(ctx, recs)
         return
@@ -757,7 +813,8 @@ def _core_pick_path(ctx: _RecContext, recs: list[dict]) -> None:
             continue
         mult, now_ok, later_ok = _slot_support(ctx, name, core.get("avg_slot"))
         if not later_ok:
-            # Kein Slot-Support mehr ab hier - das Item ist kein Kandidat.
+            # Default (`slot_late_keep=False`): Item raus aus dem Pool, weil
+            # seine Slot-Daten vor dem aktuellen Slot enden.
             skipped.append(core)
             continue
         score = (core.get("pick_rate", 0.0) * mult
@@ -839,7 +896,10 @@ def _choose_boots(options: list[dict], enemy_cc_score: float,
     # Kandidat. Weicht sie von den meistgespielten ab, die meistgespielten als
     # ZWEITE Option (reine Sichtbarkeit, keine Reihenfolge-Wirkung).
     rec = {"item": chosen["item"], "kind": "boots", "reason": reason,
-           "tag": _item_tag(chosen["item"], role=role), "avg_slot": chosen.get("avg_slot")}
+           "tag": _item_tag(chosen["item"], role=role), "avg_slot": chosen.get("avg_slot"),
+           # Gelernte Slot-Verteilung der Boots (V2-04). `_pick_next` braucht sie
+           # als Escape fuer echte Boots-first-Champions.
+           "slot_dist": chosen.get("slot_dist")}
     if source:
         rec["source"] = source
     out.append(rec)
@@ -1139,7 +1199,11 @@ def _boots_scored_recs(ctx: _RecContext, options: list[dict], *, cells: dict,
            # Kauf-Timing (V2-02): Minuten-Quantile der Boots-Fertigstellung.
            # `_pick_next` nutzt sie als gelernten Ersatz fuer die 10-Minuten-
            # Faustregel, wenn keine avg_slot-Reihenfolge vorliegt.
-           "minute": chosen.get("minute")}
+           "minute": chosen.get("minute"),
+           # Gelernte Slot-Verteilung der Boots (V2-04): entscheidet in
+           # `_pick_next`, ob dieser Champion die Boots wirklich als ERSTEN
+           # fertigen Kauf schnuert.
+           "slot_dist": chosen.get("slot_dist")}
     if source:
         rec["source"] = source
     out = [rec]
@@ -1509,8 +1573,8 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
     # Modell); `na_owned` sind die FERTIGEN Items im Besitz (Menge O).
     na_cond, na_marginal, na_owned = ctx.na_cond, ctx.na_marginal, ctx.na_owned
     # Restpfad-Neubewertung (V2-05): Slot-Support daempft den Basisterm, Items
-    # ohne Support ab dem aktuellen Slot fallen raus, die Pool-Scores wandern
-    # nach ctx (Entscheidung faellt in _assemble_result).
+    # ohne Support im aktuellen Slot landen auf `path_block`, die Pool-Scores
+    # wandern nach ctx (Entscheidung faellt in _assemble_result).
     path_on = weights.path_rescore_factor > 0.0
     path_scores: dict[str, float] = {}
     path_block: set[str] = set()
@@ -1538,10 +1602,12 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
             slot_mult, now_ok, later_ok = _slot_support(
                 ctx, name, entry.get("avg_slot"))
             if not later_ok:
-                # In keinem Slot ab dem aktuellen gebaut -> kein Kandidat mehr.
+                # Default (`slot_late_keep=False`): Slot-Daten enden vor dem
+                # aktuellen Slot -> kein Kandidat mehr.
                 continue
             if not now_ok:
-                # Support erst spaeter: bleibt im Pool (Sichtbarkeit), darf aber
+                # Support erst spaeter ODER nur frueher (Datenende, s.
+                # `_slot_support`): bleibt im Pool (Sichtbarkeit), darf aber
                 # nicht als naechster Kauf vorgeschlagen werden.
                 path_block.add(name)
         # Basis-Score = Pick-Rate, multiplikativ mit dem next_after-Lift. Der
@@ -1725,6 +1791,57 @@ def _path_winner(ctx: _RecContext, recs: list[dict]) -> str | None:
     return None
 
 
+def _now_pct(ctx: _RecContext, recs: list[dict], next_pick: dict | None) -> None:
+    """Setzt `now_pct` (Anteil am Empfehlungs-Score fuer den naechsten Kauf) auf
+    den angezeigten Recs und - falls es dazugehoert - auf dem `next`-Dict.
+
+    Vergleichbar sind NUR die Kandidaten des gemeinsamen Pools (V2-05,
+    `path_scores`): Core-Items und Champion-Situationals laufen dort auf
+    derselben Skala. Bewusst OHNE Prozentwert bleiben Boots (eigene Score-Skala
+    aus V2-03), der Klassen-Fallback (rankt per Design hinter der
+    Champion-Evidenz), ungescorte Defensiv-Optionen und Anti-Heal (Option, kein
+    Pflichtkauf) - eine Prozentzahl waere dort erfundene Vergleichbarkeit.
+    Ebenfalls draussen: Namen ohne Slot-Support JETZT (`path_block`) - sie
+    koennen den naechsten Kauf gar nicht stellen.
+
+    Im Legacy-Modus (path_rescore_factor == 0) gibt es keine Pool-Scores und
+    damit das Feld gar nicht."""
+    if ctx.weights.path_rescore_factor <= 0.0 or not ctx.path_scores:
+        return
+    eligible = {}
+    for rec in recs:
+        name = rec["item"]
+        score = ctx.path_scores.get(name)
+        if (score is None or score <= 0.0 or rec.get("antiheal")
+                or rec.get("source") == "class" or name in ctx.path_block):
+            continue
+        eligible[name] = (rec, score)
+    total = sum(score for _rec, score in eligible.values())
+    if total <= 0.0:
+        return
+    for name, (rec, score) in eligible.items():
+        rec["now_pct"] = round(100 * score / total)
+        if next_pick and next_pick.get("item") == name:
+            next_pick["now_pct"] = rec["now_pct"]
+
+
+def _defensive_bridge(recs: list[dict], next_pick: dict | None,
+                      completed: int) -> None:
+    """Stellt die reservierte Defensiv-Option (V2-08) in Bezug zum Next-Item.
+
+    Ohne den Bezug las sich der Block wie eine konkurrierende Anweisung
+    ("Defensiv-Option bei Rueckstand: ... wird hinten gekauft"), waehrend oben
+    ein Core-Item als naechster Kauf stand - der Spieler sieht zwei Auftraege und
+    keine Reihenfolge. Der Zusatz gilt nur vor dem ersten fertigen Item: danach
+    ist die Reihenfolge ohnehin offener."""
+    if completed > 0 or not next_pick or next_pick.get("kind") != "core":
+        return
+    for rec in recs:
+        if rec.get("defensive_slot"):
+            rec["reason"] = (f"Erst {next_pick['item']} fertigbauen - danach "
+                             f"zur Absicherung: " + rec["reason"])
+
+
 def _assemble_result(ctx: _RecContext, recs: list[dict],
                      antiheal: dict | None) -> dict:
     """Phase 7 (Befund S1): naechster Kauf, Halbfertig-Erkennung und Result-Dict
@@ -1740,6 +1857,10 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
                            slot_role=ctx.role or ctx.used_role,
                            next_block=ctx.path_block,
                            path_first=_path_winner(ctx, recs))
+    # Kaufempfehlungs-Anteil und Defensiv-Bezug haengen beide am fertigen
+    # Next-Pick, darum erst hier (recs sind dieselben Dicts wie result["items"]).
+    _now_pct(ctx, recs, next_pick)
+    _defensive_bridge(recs, next_pick, items.count_completed(ctx.owned_ids))
     # Halbfertiges Item aus den Komponenten erkennen (rein informativ - die
     # Empfehlung bleibt unveraendert). Ausblenden, wenn es OHNEHIN das naechste
     # empfohlene Item ist: dann zeigt der "Naechstes Item"-Block die Restkosten
@@ -1968,6 +2089,9 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
     zuerst das defensive Situational. Sonst entscheidet die aus den Timelines
     gelernte Kaufposition (avg_slot) zwischen Core und Boots - ohne
     Timeline-Daten gilt die Faustregel: Boots vor dem zweiten fertigen Item.
+    Solange NOCH KEIN fertiges Item im Inventar ist, gilt davor ein hartes Gate
+    (s. `boots_first`): fertige Boots nur, wenn die gelernte `slot_dist` sie als
+    Erstkauf ausweist und das gelernte Kauf-Timing erreicht ist.
     Ist das Inventar voll (6 regulaere Slots), wird ein Item-Tausch
     vorgeschlagen statt eines unkaufbaren siebten Items.
 
@@ -2005,25 +2129,44 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
 
     boots = next((r for r in recs if r["kind"] == "boots"), None)
 
+    def boots_slot_one_dominant() -> bool:
+        """Sind die vorgeschlagenen Boots laut gelernter `slot_dist` (V2-04) der
+        TYPISCHE Erstkauf? Kriterium ist der argmax der Verteilung, nicht blosse
+        Anwesenheit von Slot 1: Yorick JUNGLE baut Boots of Swiftness zwar in
+        21 % der Spiele als ersten fertigen Kauf, aber in 50 % als zweiten - das
+        ist keine Boots-first-Reihenfolge. Slot-Keys werden defensiv nach int
+        gezogen (handgeschriebene Overrides koennten Strings liefern)."""
+        clean: dict[int, float] = {}
+        for slot, share in (boots.get("slot_dist") or {}).items():
+            try:
+                clean[int(slot)] = float(share)
+            except (TypeError, ValueError):
+                continue
+        return bool(clean) and max(clean, key=lambda s: clean[s]) == 1
+
     def boots_first(other: dict) -> bool:
-        """Kommen Boots vor `other`? avg_slot entscheidet, sonst die Faustregel
-        (Boots vor dem zweiten fertigen Item)."""
+        """Kommen Boots vor `other`? Vor dem ersten fertigen Legendary gilt ein
+        hartes Gate, danach entscheidet avg_slot bzw. die Faustregel."""
         if boots is None:
             return False
+        if completed_owned == 0:
+            # Fertige Boots als ALLERERSTER Kauf sind fuer die meisten Champions
+            # datenwidrig - der avg_slot-Vergleich allein liess sie trotzdem
+            # durch (Boots avg_slot 2,1 <= Core 2,5 heisst "Boots eher vor dem
+            # Core-Item", nicht "Boots zuerst"). Erlaubt nur, wenn die gelernte
+            # Slot-Verteilung Slot 1 als haeufigsten Slot ausweist (echte
+            # Boots-first-Champions, z.B. manche Supports) UND das gelernte
+            # Kauf-Timing erreicht ist.
+            if not boots_slot_one_dominant():
+                return False
+            early = (boots.get("minute") or {}).get("p25")
+            return game_time >= (early * 60 if early else 600)
         if boots.get("avg_slot") and other.get("avg_slot"):
             return boots["avg_slot"] <= other["avg_slot"]
         # Ohne gelernte Reihenfolge: bei Lead den Damage-Spike vor die Boots
-        # ziehen (aggressive Deviation), sonst die Faustregel.
-        if eff_stance == "aggressive":
-            return False
-        # Faustregel "Boots vor dem zweiten fertigen Item" - aber die harte
-        # 10-Minuten-Marke wird durch das GELERNTE Kauf-Timing ersetzt, wo die KB
-        # es hergibt (V2-02/V2-03: `minute.p25` = frueheres Viertel der
-        # Boots-Fertigstellungen dieses Champions). 600 s war eine Faustzahl fuer
-        # alle; ein Jhin schnuert im Median bei 11,8 min, eine Janna bei 7,4.
-        early = (boots.get("minute") or {}).get("p25")
-        limit = early * 60 if early else 600
-        return completed_owned >= 1 or game_time >= limit
+        # ziehen (aggressive Deviation), sonst die Faustregel "Boots vor dem
+        # zweiten fertigen Item" - die ab hier immer erfuellt ist.
+        return eff_stance != "aggressive"
 
     pick = None
     why_now = ""

@@ -393,8 +393,14 @@ def _teamfight_balance(teamfights: list) -> tuple:
     return won, lost, len(decisive)
 
 
-def _defining_factor(objectives: dict | None) -> str | None:
-    """Praegendster Faktor als kurze Nominalphrase - oder None.
+def _defining_factor(objectives: dict | None) -> tuple[str, str, bool] | None:
+    """Praegendster Faktor als `(Nominalphrase, "trotz"-Phrase, eigener_Vorteil)`
+    - oder None.
+
+    Die zweite Phrase ist dieselbe Aussage im Dativ/Genitiv ("trotz eigenem
+    Turm-Vorteil (12:1)"), das Flag nennt die RICHTUNG (True = eigener Vorteil,
+    False = Vorteil des Gegners). Beides braucht `_verdict_outcome_line`, um
+    einen dem Ausgang zuwiderlaufenden Faktor als "trotz" zu formulieren.
 
     **Nutzer-Feedback 2026-07-26b (verbindliches Design-Prinzip): keine
     tautologischen Aussagen.** "Niederlage. Praegendster Faktor: Verlorene
@@ -427,16 +433,24 @@ def _defining_factor(objectives: dict | None) -> str | None:
     tw_marked = abs(tw_diff) >= TOWER_DIFF_MIN
     if el_marked and tw_marked:
         if el_diff > 0 and tw_diff > 0:
-            return "Eigene Objective-Kontrolle"
+            return ("Eigene Objective-Kontrolle", "eigener Objective-Kontrolle",
+                    True)
         if el_diff < 0 and tw_diff < 0:
-            return "Objective-Kontrolle des Gegners"
+            return ("Objective-Kontrolle des Gegners",
+                    "Objective-Kontrolle des Gegners", False)
         return None                      # gemischt -> kein praegender Faktor
     if el_marked:
-        return (f"Eigene Elite-Objectives ({me_el}:{opp_el})" if el_diff > 0
-                else f"Elite-Objectives des Gegners ({me_el}:{opp_el})")
+        if el_diff > 0:
+            return (f"Eigene Elite-Objectives ({me_el}:{opp_el})",
+                    f"eigener Elite-Objectives ({me_el}:{opp_el})", True)
+        return (f"Elite-Objectives des Gegners ({me_el}:{opp_el})",
+                f"Elite-Objectives des Gegners ({me_el}:{opp_el})", False)
     if tw_marked:
-        return (f"Eigener Turm-Vorteil ({mt}:{ot})" if tw_diff > 0
-                else f"Turm-Vorteil des Gegners ({mt}:{ot})")
+        if tw_diff > 0:
+            return (f"Eigener Turm-Vorteil ({mt}:{ot})",
+                    f"eigenem Turm-Vorteil ({mt}:{ot})", True)
+        return (f"Turm-Vorteil des Gegners ({mt}:{ot})",
+                f"Turm-Vorteil des Gegners ({mt}:{ot})", False)
     return None
 
 
@@ -444,12 +458,24 @@ def _verdict_outcome_line(win, outcome_known: bool,
                           objectives: dict | None) -> str | None:
     """Zeile 1: Spiel-Ausgang + praegendster Faktor - Letzterer nur, wenn er
     nicht-tautologisch ist (s. `_defining_factor`). Ohne bekanntes Endergebnis
-    (Live-/Dump-Pfad) bleibt nur der Faktor."""
+    (Live-/Dump-Pfad) bleibt nur der Faktor.
+
+    **Korrektur 2026-08-02:** laeuft der Faktor dem Ausgang ZUWIDER (Sieg trotz
+    Objective-Rueckstand, Niederlage trotz eigenem Vorsprung), war die alte
+    Formulierung widerspruechlich - "Sieg. Praegendster Faktor: Elite-Objectives
+    des Gegners (0:7)." Der praegendste Faktor eines Siegs kann nicht das
+    Uebergewicht des Gegners sein. Solche Faelle bekommen die "trotz"-Form; der
+    Faktor bleibt sichtbar, aber als Gegensatz statt als Ursache."""
     factor = _defining_factor(objectives)
-    if outcome_known:
-        res = "Sieg" if win else "Niederlage"
-        return f"{res}. Prägendster Faktor: {factor}." if factor else f"{res}."
-    return f"Prägendster Faktor: {factor}." if factor else None
+    if not outcome_known:
+        return f"Prägendster Faktor: {factor[0]}." if factor else None
+    res = "Sieg" if win else "Niederlage"
+    if not factor:
+        return f"{res}."
+    text, despite, mine = factor
+    if mine is not bool(win):
+        return f"{res} – trotz {despite}."
+    return f"{res}. Prägendster Faktor: {text}."
 
 
 def _verdict_lane_line(me_player: dict, has_damage: bool) -> str | None:

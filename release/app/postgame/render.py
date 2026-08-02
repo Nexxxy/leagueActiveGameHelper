@@ -427,7 +427,9 @@ def _build_replay_html(p: dict) -> str:
     des Engine-Checks getrennt ('2 konform · 1 vertretbar · 1 Abweichung von 4
     Käufen', V2-06) + optional die Boots-Teilmenge, darunter je nicht-konformem
     Kauf entweder der statistische Rückhalt (vertretbar) oder die Engine-
-    Alternative (Abweichung). `build_replay` None (fehlender Static-Cache/
+    Alternative (Abweichung) - Letztere zu einer Zeile verdichtet, solange
+    aufeinanderfolgende Abweichungen dieselbe Engine-Top-3 nennen.
+    `build_replay` None (fehlender Static-Cache/
     builds.yaml) -> leer; 'nicht bewertbar', wenn kein KB-Wissen."""
     br = p.get("build_replay")
     if not br:
@@ -459,19 +461,38 @@ def _build_replay_html(p: dict) -> str:
     if boots.get("total", 0):
         head += (f' <span class="muted">· Boots {boots.get("hits", 0)}/'
                  f'{boots.get("total", 0)}</span>')
-    rows = []
+    rows: list[str] = []
+    # Direkt aufeinanderfolgende Abweichungen mit IDENTISCHER Engine-Top-3 werden
+    # zu EINER Zeile verdichtet (Realfall: vier Spaet-Items, dreimal dieselbe
+    # Alternative - vier fast gleiche Zeilen sagen nur einmal etwas). Eine
+    # dazwischenliegende "vertretbar"-Zeile beendet die Gruppe; ok-Zeilen selbst
+    # werden nie gruppiert (ihr Grund ist je Kauf verschieden).
+    group: list[dict] = []
+
+    def _flush_group() -> None:
+        if not group:
+            return
+        mins = "/".join(str(pu["minute"]) for pu in group)
+        items = ", ".join(_esc(pu["item"]) for pu in group)
+        top = " / ".join(_esc(t) for t in (group[0].get("engine_top") or [])) or "–"
+        rows.append(f'<li>Min {mins}: {items} '
+                    f'<span class="muted">→ Engine: {top}</span></li>')
+        group.clear()
+
     for pu in br.get("purchases", []):
         grade = _purchase_grade(pu)
         if grade == "hit":
             continue
         if grade == "ok":
+            _flush_group()
             reason = pu.get("ok_reason") or "statistisch gestützt"
-            note = f'→ vertretbar: {_esc(reason)}'
-        else:
-            top = " / ".join(_esc(t) for t in (pu.get("engine_top") or [])) or "–"
-            note = f'→ Engine: {top}'
-        rows.append(f'<li>Min {pu["minute"]}: {_esc(pu["item"])} '
-                    f'<span class="muted">{note}</span></li>')
+            rows.append(f'<li>Min {pu["minute"]}: {_esc(pu["item"])} '
+                        f'<span class="muted">→ vertretbar: {_esc(reason)}</span></li>')
+            continue
+        if group and list(group[0].get("engine_top") or []) != list(pu.get("engine_top") or []):
+            _flush_group()
+        group.append(pu)
+    _flush_group()
     dev_html = f'<ul class="br-dev">{"".join(rows)}</ul>' if rows else ""
     return f'<div class="br">{head}{dev_html}</div>'
 

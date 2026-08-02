@@ -74,6 +74,16 @@
          text-transform: uppercase; letter-spacing: .03em; padding: 1px 7px;
          border-radius: 6px; border: 1px solid var(--border); color: var(--muted);
          white-space: nowrap; }
+  /* CORE-Badge: markiert das Item aus dem gelernten Core-Build. */
+  .core-badge { display: inline-block; font-size: .64rem; font-weight: 700;
+         text-transform: uppercase; letter-spacing: .03em; padding: 1px 7px;
+         border-radius: 6px; border: 1px solid var(--accent); color: var(--accent);
+         white-space: nowrap; }
+  /* Anteil am Empfehlungs-Score fuer den naechsten Kauf (nur Pool-Kandidaten). */
+  .nowpct { display: inline-block; font-size: .66rem; font-weight: 700;
+         padding: 1px 8px; border-radius: 20px; background: #10151d;
+         border: 1px solid var(--border); color: var(--balanced);
+         font-variant-numeric: tabular-nums; white-space: nowrap; }
   .spike { font-size: .78rem; font-weight: 600; color: var(--aggressive);
            margin: 2px 0; }
   .spike.high { color: #ff5252; }
@@ -307,6 +317,8 @@ function render(s) {
      ${s.assets_available && i.item_id ? `<img class="iicon" src="assets/items/${i.item_id}.png" alt="" onerror="this.remove()">` : ""}
      <span class="item">${i.item}</span>
      ${i.tag ? `<span class="${tagClass(i.tag)}">${i.tag}</span>` : `<span class="tag" style="visibility:hidden">-</span>`}
+     ${i.kind === "core" ? `<span class="core-badge" title="Teil des gelernten Core-Builds">Core</span>` : ""}
+     ${i.now_pct != null ? `<span class="nowpct" title="Anteil am Empfehlungs-Score f&uuml;r den n&auml;chsten Kauf">${i.now_pct} % jetzt</span>` : ""}
      ${i.source === "class" ? `<span class="src-class" title="aus Klassen-Daten (Fallback bei duenner Datenlage)">Klasse</span>` : ""}
      <span class="muted">${i.reason}</span></div>`).join("")
     || '<div class="muted">Keine offenen Empfehlungen – Build komplett.</div>';
