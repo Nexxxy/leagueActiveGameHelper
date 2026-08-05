@@ -445,6 +445,42 @@ def set_role(update: RoleUpdate):
     return {"ok": True}
 
 
+@app.get("/api/item/{item_id}")
+def get_item(item_id: int):
+    """Data-Dragon-Statik eines Items fuer den Hover-Tooltip im Frontend.
+
+    Liefert die ENGLISCHE Originalbeschreibung (en_US) samt Riot-Markup
+    (`<passive>`, `<magicDamage>`, ...) - das Frontend escaped sie und uebersetzt
+    nur eine bekannte Tag-Whitelist zurueck in eigenes Markup.
+
+    Quelle ist `items.by_id`, also das SR-gefilterte Set: genau die Items, die
+    die Engine auch empfiehlt, inklusive der Rezept-Komponenten aus der
+    Item-Timeline (Long Sword & Co. tragen maps['11']). Modus-Varianten
+    (ARAM/Arena) sind bewusst draussen - sie tragen zu denselben Namen
+    abweichende Preise und Beschreibungen.
+
+    Unbekannte ID -> {"found": false} mit HTTP 200: ein Tooltip ist Beiwerk, ein
+    404/500 im Netzwerk-Tab waere lauter als der Nutzen (gleiche Linie wie
+    /api/history - Endpoints werfen hier nie 500)."""
+    try:
+        item = items.by_id(item_id)
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Item {item_id} nicht lesbar ({exc})")
+        return {"found": False}
+    if not item:
+        return {"found": False}
+    gold = item.get("gold", {})
+    return {
+        "found": True,
+        "name": item.get("name", f"Item {item_id}"),
+        "plaintext": item.get("plaintext", ""),
+        "description": item.get("description", ""),
+        "gold_total": gold.get("total", 0),
+        "gold_base": gold.get("base", 0),
+        "purchasable": bool(gold.get("purchasable", True)),
+    }
+
+
 @app.get("/api/history")
 def get_history():
     """Die letzten Post-Game-Reports fuer die Match-History-Seite.

@@ -56,20 +56,36 @@
   #confidence .badge { display: inline-block; padding: 2px 10px; border-radius: 20px;
             font-weight: 600; font-size: .72rem; background: var(--aggressive);
             color: #10141a; margin-right: 8px; }
-  #building { margin: 6px 0 2px; }
-  #building .building { color: var(--balanced); font-weight: 600; }
   #recs .card { margin-bottom: 8px; display: flex; gap: 12px; align-items: baseline; }
   #recs .card.alt { opacity: .68; }   /* zweite Boots-Option (Sichtbarkeit) */
+  /* Schnitt zwischen der gewichteten Liste (pool: true) und allem, was auf einer
+     eigenen Score-Skala laeuft (Boots, Klassen-Fallback, Anti-Heal ...). Bewusst
+     gedaempft: der Block ist eine Ergaenzung, kein zweites Ranking. */
+  #recs .sep { color: var(--muted); font-size: .72rem; font-weight: 600;
+               text-transform: uppercase; letter-spacing: .08em;
+               border-top: 1px solid var(--border); margin: 16px 0 8px;
+               padding-top: 8px; }
   #recs .item { font-weight: 600; min-width: 180px; }
   #recs .kind { font-size: .7rem; text-transform: uppercase; color: var(--accent); min-width: 80px; }
   .iicon { width: 56px; height: 56px; border-radius: 6px; flex: none; align-self: center; }
   #next .iicon { width: 64px; height: 64px; }
+  /* Zweck-Badge ("wogegen": Anti-Tank, Anti-AD, ...). Die Grundklasse ist
+     NEUTRAL (Outline) - gefuelltes Accent-Blau kollidierte mit der Stance-
+     Farbwelt (--defensive). Gefuellt wird nur ueber die Achse: .off = das Item
+     schlaegt zu (gruen), .def = das Item haelt aus (defensiv-blau). */
   .tag { display: inline-block; font-size: .68rem; font-weight: 700;
          text-transform: uppercase; letter-spacing: .03em; padding: 2px 8px;
-         border-radius: 6px; background: var(--accent); color: #10141a;
-         white-space: nowrap; }
+         border-radius: 6px; border: 1px solid var(--border); color: var(--muted);
+         background: transparent; white-space: nowrap; }
   #recs .tag { min-width: 96px; text-align: center; flex: none; }
-  .tag.off { background: var(--balanced); }   /* Damage-Tags (Power/DPS) gruen */
+  .tag.off { background: var(--balanced); border-color: var(--balanced); color: #10141a; }
+  .tag.def { background: var(--defensive); border-color: var(--defensive); color: #10141a; }
+  /* Natur-Badges ("was es dir gibt": +HP/+Ruestung/+MR) - Outline in der
+     defensiven Farbe, damit die defensive Haelfte von Hybriden sichtbar wird. */
+  .statbadge { display: inline-block; font-size: .62rem; font-weight: 700;
+         text-transform: uppercase; letter-spacing: .03em; padding: 1px 7px;
+         border-radius: 6px; border: 1px solid var(--defensive);
+         color: var(--defensive); background: transparent; white-space: nowrap; }
   .src-class { display: inline-block; font-size: .64rem; font-weight: 700;
          text-transform: uppercase; letter-spacing: .03em; padding: 1px 7px;
          border-radius: 6px; border: 1px solid var(--border); color: var(--muted);
@@ -79,11 +95,27 @@
          text-transform: uppercase; letter-spacing: .03em; padding: 1px 7px;
          border-radius: 6px; border: 1px solid var(--accent); color: var(--accent);
          white-space: nowrap; }
-  /* Anteil am Empfehlungs-Score fuer den naechsten Kauf (nur Pool-Kandidaten). */
-  .nowpct { display: inline-block; font-size: .66rem; font-weight: 700;
-         padding: 1px 8px; border-radius: 20px; background: #10151d;
-         border: 1px solid var(--border); color: var(--balanced);
-         font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* Kaufstaerke relativ zur Top-Empfehlung (nur Pool-Kandidaten): schmaler
+     Balken + Zahl, 100 % = staerkstes Kaufsignal. Bewusst dezent in der
+     Muted-Farbwelt - die Zahl ordnet ein, sie ist kein zweites Ranking.
+     Gross genug zum Ablesen (.85rem): bei .66rem war die Zahl auf dem Monitor
+     im Spiel nicht mehr zu erkennen. */
+  .nowrel { display: inline-block; font-size: .85rem; font-weight: 700;
+         color: var(--muted); font-variant-numeric: tabular-nums;
+         white-space: nowrap; }
+  .nowrel .track { display: inline-block; vertical-align: middle;
+         width: 56px; height: 6px; margin-right: 6px; border-radius: 3px;
+         background: #10151d; border: 1px solid var(--border);
+         overflow: hidden; }
+  .nowrel .fill { display: block; height: 100%; border-radius: 3px;
+         background: var(--balanced); }
+  /* In der Liste steht der Balken DIREKT hinter dem Itemnamen (der hat
+     min-width, also alignen die Balken untereinander). Vorher stand er am Ende
+     hinter den Stat-Badges - und weil je Karte 0, 1 oder 2 Stat-Badges kommen,
+     rutschte jeder Balken auf eine andere x-Position: nichts war vergleichbar.
+     Die feste Mindestbreite haelt die nachfolgenden Zweck-Badges in einer
+     Spalte, auch bei Karten ohne Kaufstaerke (unsichtbarer Platzhalter). */
+  #recs .nowrel { min-width: 112px; flex: none; }
   .spike { font-size: .78rem; font-weight: 600; color: var(--aggressive);
            margin: 2px 0; }
   .spike.high { color: #ff5252; }
@@ -125,6 +157,41 @@
     color: var(--muted); text-decoration: none; font-size: .9rem;
     font-weight: 600; }
   #historyLink:hover { border-color: var(--accent); color: var(--accent); }
+  /* Item-Tooltip (Hover ueber ein Item-Icon): EIN globales Element, das per
+     position:fixed an die Maus gehaengt wird. pointer-events:none ist wichtig -
+     sonst schoebe sich der Tooltip unter den Cursor, loeste dort ein mouseout
+     auf dem Icon aus und flackerte. [hidden] explizit pinnen, weil die eigenen
+     display-Regeln sonst das UA-Default ueberschreiben (gleiche Falle wie beim
+     Report-Banner). */
+  #tooltip[hidden] { display: none; }
+  #tooltip { position: fixed; left: 0; top: 0; z-index: 100; display: block;
+    max-width: 380px; pointer-events: none;
+    background: var(--card); border: 1px solid var(--accent); border-radius: 10px;
+    padding: 10px 12px; font-size: .82rem; line-height: 1.45;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .6); }
+  #tooltip .tt-name { font-weight: 700; font-size: .95rem; color: var(--accent); }
+  #tooltip .tt-gold { font-weight: 600; font-variant-numeric: tabular-nums;
+    color: #f0c419; }
+  #tooltip .tt-plain { color: var(--muted); font-style: italic; margin-top: 4px; }
+  #tooltip .tt-body { margin-top: 8px; border-top: 1px solid var(--border);
+    padding-top: 8px; }
+  /* Riot-Markup-Klassen: die Beschreibung aus Data Dragon traegt eigene Tags
+     (<passive>, <magicDamage>, ...). Sie werden NICHT roh ins DOM gelassen,
+     sondern nach dem Escapen ueber eine Whitelist in genau diese Klassen
+     uebersetzt (s. riotText). Farbwelt bewusst nah am Spiel-Tooltip. */
+  #tooltip .tt-passive { font-weight: 700; color: var(--accent); }
+  #tooltip .tt-active { font-weight: 700; color: #f0c419; }
+  #tooltip .tt-attention { font-weight: 700; color: var(--text); }
+  #tooltip .tt-keyword { font-weight: 600; color: var(--accent); }
+  #tooltip .tt-stats { color: var(--text); }
+  #tooltip .tt-rules { color: var(--muted); font-style: italic; font-size: .95em; }
+  #tooltip .tt-magic { color: #7e97f7; }
+  #tooltip .tt-phys { color: var(--aggressive); }
+  #tooltip .tt-true { color: #e8dfc8; }
+  #tooltip .tt-heal { color: var(--balanced); }
+  #tooltip .tt-shield { color: #cfd8dc; }
+  #tooltip .tt-status { color: #ffd54f; }
+  #tooltip .tt-legendary { color: #e0b465; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -142,7 +209,6 @@
   <div id="game" hidden>
     <h2>Du</h2>
     <div class="card" id="me"></div>
-    <div id="building"></div>
 
     <h2>N&auml;chstes Item</h2>
     <div id="confidence"></div>
@@ -153,7 +219,7 @@
       <div id="plan"></div>
     </div>
 
-    <h2>Empfehlungen</h2>
+    <h2>Situational</h2>
     <div id="stanceline" style="margin-bottom:8px"></div>
     <div id="recs"></div>
 
@@ -163,6 +229,11 @@
 
   <!-- Immer sichtbar, ganz unten: Einstieg in die Match-History-Seite. -->
   <div><a id="historyLink" href="history.html">&#128220; Match History Reports</a></div>
+
+  <!-- EIN globaler Item-Tooltip fuer alle Icons (Next, Liste, Timeline). Ein
+       Element pro Icon waere Verschwendung und muesste bei jedem Neurendern
+       mitwandern; dieses hier lebt ausserhalb der neu gebauten Container. -->
+  <div id="tooltip" hidden></div>
 
 <script>
 const PRIOS = ["low", "medium", "high", "urgent"];
@@ -175,9 +246,34 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// Buzzword-Tag: Damage-Tags (Power/DPS/Lethality) gruen, Konter-/Defensiv-Tags
-// im Akzent (Burn/%HP wirkt wie Anti-Tank -> Akzent; "Anti-Burst" nicht gruen).
-function tagClass(t) { return /Power|DPS|Lethality/.test(t) ? "tag off" : "tag"; }
+// Farbe des Zweck-Badges kommt aus der ACHSE (rec.tag_axis), nicht mehr aus dem
+// Tag-Text: "Anti-Tank" ist ein OFFENSIVES Item (Void Staff), "Anti-AD" ein
+// defensives - am Wort "Anti-" waren beide nicht zu unterscheiden.
+// hybrid zaehlt als offensiv (es schlaegt zu), die Stat-Badges zeigen daneben,
+// was das Item defensiv mitbringt. Ohne Achse (Consumables, alte Payloads):
+// neutrales Outline-Badge.
+function tagClass(rec) {
+  const ax = rec && rec.tag_axis;
+  if (ax === "off" || ax === "hybrid") return "tag off";
+  if (ax === "def") return "tag def";
+  return "tag";
+}
+
+// Natur-Badges ("+HP"/"+Ruestung"/"+MR") hinter dem Zweck-Badge.
+function statBadges(rec) {
+  return ((rec && rec.stats) || [])
+    .map(s => `<span class="statbadge">${esc(s)}</span>`).join(" ");
+}
+
+// Kaufstaerke-Anzeige (`now_rel`): Balken + Zahl, 100 % traegt der staerkste
+// vergleichbare Kandidat. Die Skala ist bewusst RELATIV und kein Anteil an der
+// Summe mehr - "19 % jetzt" wurde als Konfidenz gelesen ("nur zu 19 % sicher"),
+// obwohl es der Sieger war, und die Zahl hing an der Listenlaenge.
+function relBar(v) {
+  const w = Math.max(0, Math.min(100, v));
+  return `<span class="nowrel" title="Kaufst&auml;rke relativ zur Top-Empfehlung (100 % = st&auml;rkstes Kaufsignal)"
+     ><span class="track"><span class="fill" style="width:${w}%"></span></span>${v} %</span>`;
+}
 
 async function setPriority(champion, priority) {
   await fetch("/api/priority", {
@@ -243,13 +339,6 @@ function render(s) {
      ${p.gold_spent} G ausgegeben
      <div class="itemlist">${p.items.join(", ") || "keine Items"}</div>`;
 
-  const b = r.building;
-  document.getElementById("building").innerHTML = b
-    ? `<span class="building">🔧 Du baust bereits <b>${b.item}</b>
-       <span class="muted">(${b.components.join(", ")}) – noch ${b.remaining} G
-       ${b.meta ? "" : "· untypisch für diese Rolle"}</span></span>`
-    : "";
-
   const n = r.next;
   if (n) {
     const rest = n.cost_remaining !== undefined ? n.cost_remaining : n.cost;
@@ -266,10 +355,17 @@ function render(s) {
     if (n.sell_item) {
       gold = `<span class="swap">↺ ${n.sell_item} verkaufen</span> ${gold}`;
     }
+    // `now_rel === 100` heisst: der naechste Kauf IST der staerkste Kandidat -
+    // und genau das ist die Regel, nicht die Ausnahme. Eine Anzeige dafuer waere
+    // reine Tautologie ("der Top-Vorschlag ist der Top-Vorschlag"), darum bleibt
+    // die Stelle leer. Ein ABWEICHENDER Wert kommt vor, wenn ein Timing-Gate
+    // (Boots-Gate, Defensiv-Zweig) den Pool-Sieger ueberholt; nur dann zeigt der
+    // Balken, wie stark dieser Kauf gegenueber der staerksten Karte der Liste ist.
+    const nrel = (n.now_rel != null && n.now_rel !== 100) ? relBar(n.now_rel) : "";
     document.getElementById("next").innerHTML =
-      `${s.assets_available && n.item_id ? `<img class="iicon" src="assets/items/${n.item_id}.png" alt="" onerror="this.remove()">` : ""}
+      `${s.assets_available && n.item_id ? `<img class="iicon" data-item-id="${n.item_id}" src="assets/items/${n.item_id}.png" alt="" onerror="this.remove()">` : ""}
        <span class="itemname">${n.item}</span>
-       ${n.tag ? `<span class="${tagClass(n.tag)}">${n.tag}</span>` : ""} ${gold}
+       ${n.tag ? `<span class="${tagClass(n)}">${n.tag}</span>` : ""} ${statBadges(n)} ${nrel} ${gold}
        <span class="muted">${n.reason}</span>`;
   } else {
     document.getElementById("next").innerHTML = r.note
@@ -294,7 +390,7 @@ function render(s) {
         : `${esc(st.name)} · ${st.cost} G`;
       const chev = i > 0 ? `<span class="chevron">›</span>` : "";
       return `${chev}<div class="${cls.join(" ")}" title="${title}">
-        <img src="assets/items/${st.item_id}.png" alt="" onerror="this.remove()"></div>`;
+        <img data-item-id="${st.item_id}" src="assets/items/${st.item_id}.png" alt="" onerror="this.remove()"></div>`;
     }).join("");
   } else {
     planEl.innerHTML = "";
@@ -312,16 +408,57 @@ function render(s) {
      (Datenbasis: ${r.knowledge_games} High-Elo-Spiele)</span>`
     + (r.stance_note ? `<div class="muted" style="font-size:0.85em">${r.stance_note}</div>` : "");
 
-  document.getElementById("recs").innerHTML = r.items.map(i =>
-    `<div class="card${i.alternative ? " alt" : ""}"><span class="kind">${i.kind}</span>
-     ${s.assets_available && i.item_id ? `<img class="iicon" src="assets/items/${i.item_id}.png" alt="" onerror="this.remove()">` : ""}
+  // Die Engine liefert items[] bereits gewichtet sortiert (Pool-Score) - hier
+  // wird nur noch gefiltert und getrennt:
+  // 1. Der Next-Sieger steht oben gross und bleibt fuer die Messung in items[]
+  //    (replay_candidates) - in der Liste waere er eine reine Dopplung.
+  // 2. Vor der ersten Karte ohne Pool-Score kommt ein gedaempfter Trenner:
+  //    Boots/Klassen-Fallback/Anti-Heal sind mit der Gewichtung nicht
+  //    vergleichbar (`pool === false`; alte Payloads ohne Feld -> kein Trenner).
+  //    Er kommt NUR, wenn vorher wirklich gewichtete Karten standen - sonst
+  //    truege er nichts ab (Legacy-Modus ohne Pool-Scores, Support-Endwahl, oder
+  //    wenn der einzige Pool-Eintrag der ausgeblendete Sieger war).
+  // 3. Die Karten des festen Listen-Kopfs (`head`, Core + Boots in gelernter
+  //    Bau-Reihenfolge) loesen den Trenner NIE aus: sie stehen vor der
+  //    gewichteten Gruppe, auch wenn einzelne von ihnen keinen Pool-Score haben
+  //    (Alternative, Comp-Hinweis) - der Trenner gehoert vor die erste Karte
+  //    ohne Score, die NICHT zum Kopf gehoert.
+  const nextItem = r.next ? r.next.item : null;
+  let poolSeen = false, sepDone = false;
+  document.getElementById("recs").innerHTML = r.items
+    .filter(i => i.item !== nextItem)
+    .map(i => {
+      let sep = "";
+      if (i.pool) poolSeen = true;
+      else if (poolSeen && !sepDone && !i.head) {
+        sepDone = true;
+        sep = `<div class="sep">Weitere Optionen</div>`;
+      }
+      // Reihenfolge: kind | Icon | Name | Kaufstaerke | Zweck | Stats | Core/Klasse
+      // | Grund. Die Kaufstaerke steht direkt hinter dem Namen (fixe min-width),
+      // weil sie am Zeilenende hinter den variabel vielen Stat-Badges auf jeder
+      // Karte woanders begann - untereinander lesbar war da nichts.
+      // Karten OHNE Kaufstaerke (Boots, Klassen-Fallback, Anti-Heal unter dem
+      // Trenner) bekommen einen unsichtbaren Platzhalter, sonst rutschen ihre
+      // Zweck-Badges aus der Spalte (gleiches Muster wie beim Zweck-Badge selbst).
+      return `${sep}<div class="card${i.alternative ? " alt" : ""}"><span class="kind">${i.kind}</span>
+     ${s.assets_available && i.item_id ? `<img class="iicon" data-item-id="${i.item_id}" src="assets/items/${i.item_id}.png" alt="" onerror="this.remove()">` : ""}
      <span class="item">${i.item}</span>
-     ${i.tag ? `<span class="${tagClass(i.tag)}">${i.tag}</span>` : `<span class="tag" style="visibility:hidden">-</span>`}
+     ${i.now_rel != null ? relBar(i.now_rel) : `<span class="nowrel" style="visibility:hidden">-</span>`}
+     ${i.tag ? `<span class="${tagClass(i)}">${i.tag}</span>` : `<span class="tag" style="visibility:hidden">-</span>`}
+     ${statBadges(i)}
      ${i.kind === "core" ? `<span class="core-badge" title="Teil des gelernten Core-Builds">Core</span>` : ""}
-     ${i.now_pct != null ? `<span class="nowpct" title="Anteil am Empfehlungs-Score f&uuml;r den n&auml;chsten Kauf">${i.now_pct} % jetzt</span>` : ""}
      ${i.source === "class" ? `<span class="src-class" title="aus Klassen-Daten (Fallback bei duenner Datenlage)">Klasse</span>` : ""}
-     <span class="muted">${i.reason}</span></div>`).join("")
-    || '<div class="muted">Keine offenen Empfehlungen – Build komplett.</div>';
+     <span class="muted">${i.reason}</span></div>`;
+    }).join("")
+    // Leere Liste: seit der Regel "nur plausible naechste Kaeufe" kann das auch
+    // FRUEH passieren (alles andere ist erst spaeter dran, und der einzige
+    // Vorschlag steht schon oben gross) - dann waere "Build komplett" schlicht
+    // falsch. Der Fall haengt daran, ob es ueberhaupt noch ein echtes Item gibt.
+    || (r.next && r.next.kind !== "consumable"
+        ? '<div class="muted">Nur der Vorschlag oben steht gerade an – '
+          + 'Karten für spätere Käufe blendet die Liste aus.</div>'
+        : '<div class="muted">Keine offenen Empfehlungen – Build komplett.</div>');
 
   const spikes = {};
   (r.spike_warnings || []).forEach(w => { spikes[w.name] = w; });
@@ -348,6 +485,133 @@ async function refresh() {
 document.getElementById("enemies").addEventListener("change", ev => {
   const sel = ev.target.closest("select.prio");
   if (sel) setPriority(sel.dataset.champion, sel.value);
+});
+
+// --- Item-Tooltip (Hover ueber ein Item-Icon) -------------------------------
+// Zeigt die englische Data-Dragon-Beschreibung (Name, Preis, Kurztext, Stats/
+// Passiven/Aktiven) - dieselbe Quelle, die auch die Engine liest, also gibt es
+// keinen zweiten Wahrheitsstand ueber ein Item.
+
+// Riot-Markup -> CSS-Klasse. Leerer Wert = reiner Container, dessen Tags
+// verschwinden, waehrend der Inhalt bleibt (<mainText>, <font color=...>).
+// Alles, was hier NICHT steht, wird spurlos entfernt: lieber ein Tag zu wenig
+// gerendert als fremdes Markup ins DOM lassen.
+const TT_TAGS = {
+  maintext: "", font: "",
+  stats: "tt-stats", attention: "tt-attention", rules: "tt-rules",
+  flavortext: "tt-rules",
+  passive: "tt-passive", active: "tt-active",
+  keyword: "tt-keyword", keywordmajor: "tt-keyword", keywordstealth: "tt-keyword",
+  spellname: "tt-keyword", unique: "tt-keyword", raritygeneric: "tt-keyword",
+  raritylegendary: "tt-legendary", raritymythic: "tt-legendary",
+  magicdamage: "tt-magic", scaleap: "tt-magic", scalemana: "tt-magic",
+  physicaldamage: "tt-phys", scalead: "tt-phys", scalelethality: "tt-phys",
+  attackspeed: "tt-phys", onhit: "tt-phys",
+  truedamage: "tt-true",
+  healing: "tt-heal", lifesteal: "tt-heal", omnivamp: "tt-heal",
+  scalehealth: "tt-heal", health: "tt-heal",
+  shield: "tt-shield",
+  status: "tt-status", speed: "tt-status", scalelevel: "tt-status",
+  scalearmor: "tt-status", scalemr: "tt-status", gold: "tt-status",
+};
+
+// Tag-Erkennung NACH dem Escapen: aus "<passive>" ist da "&lt;passive&gt;"
+// geworden. Der Attribut-Teil wird mitgefressen und weggeworfen (nur der
+// Tag-Name entscheidet) - er landet nie im erzeugten HTML.
+const TT_TAG_RE = /&lt;(\/?)([a-zA-Z][a-zA-Z0-9]*)(?:(?!&gt;|&lt;)[\s\S])*&gt;/g;
+
+// Riots Beschreibungstext in sicheres Anzeige-HTML uebersetzen.
+// Reihenfolge ist der ganze Sicherheitstrick: ERST alles escapen (danach kann
+// aus dem API-Text kein Element mehr entstehen), DANN nur die bekannte
+// Whitelist wieder zu eigenen <span>/<br> aufwerten. Kein Roh-Text aus der API
+// geht je ungefiltert ins DOM.
+function riotText(desc) {
+  let html = esc(desc);
+  html = html.replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+  html = html.replace(/&lt;li&gt;/gi, "<br>&bull; ")
+             .replace(/&lt;\/li&gt;/gi, "");
+  return html.replace(TT_TAG_RE, (_m, slash, tag) => {
+    const cls = TT_TAGS[tag.toLowerCase()];
+    if (cls === undefined || cls === "") return "";   // unbekannt/Container -> weg
+    return slash ? "</span>" : `<span class="${cls}">`;
+  });
+}
+
+// item_id -> API-Antwort. Auch `found:false` wird gecacht: sonst feuert jeder
+// Hover ueber dasselbe unbekannte Item einen neuen Request.
+const TT_CACHE = new Map();
+let ttCurrent = null;   // Item-ID, ueber der die Maus gerade steht (null = keine)
+
+function ttEl() { return document.getElementById("tooltip"); }
+
+function ttHide() {
+  ttCurrent = null;
+  ttEl().hidden = true;
+}
+
+// Am Cursor ausrichten und am Viewport klemmen: ohne das Klemmen liefe der
+// Tooltip an der rechten/unteren Kante aus dem Bild und waere unlesbar.
+function ttPlace(x, y) {
+  const el = ttEl(), pad = 16, edge = 8;
+  const r = el.getBoundingClientRect();
+  let left = x + pad, top = y + pad;
+  if (left + r.width > window.innerWidth - edge) {
+    left = Math.max(edge, x - pad - r.width);
+  }
+  if (top + r.height > window.innerHeight - edge) {
+    top = Math.max(edge, window.innerHeight - edge - r.height);
+  }
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
+function ttHtml(d) {
+  const combine = (d.gold_base && d.gold_base !== d.gold_total)
+    ? ` <span class="tt-rules">(Kombi ${d.gold_base} G)</span>` : "";
+  return `<div class="tt-name">${esc(d.name)}</div>
+    <div class="tt-gold">${d.gold_total} G${combine}</div>
+    ${d.plaintext ? `<div class="tt-plain">${esc(d.plaintext)}</div>` : ""}
+    ${d.description ? `<div class="tt-body">${riotText(d.description)}</div>` : ""}`;
+}
+
+async function ttShow(id, x, y) {
+  const el = ttEl();
+  let data = TT_CACHE.get(id);
+  if (data === undefined) {
+    // Waehrend des Fetches schon etwas zeigen - sonst wirkt der erste Hover tot.
+    el.innerHTML = `<span class="tt-rules">&hellip;</span>`;
+    el.hidden = false;
+    ttPlace(x, y);
+    try {
+      data = await (await fetch(`/api/item/${encodeURIComponent(id)}`)).json();
+    } catch (err) { data = { found: false }; }   // Server weg -> stumm bleiben
+    TT_CACHE.set(id, data);
+    if (ttCurrent !== id) return;   // Maus ist weitergezogen -> Antwort verwerfen
+  }
+  if (!data || !data.found) { ttHide(); return; }
+  el.innerHTML = ttHtml(data);
+  el.hidden = false;
+  ttPlace(x, y);
+}
+
+// Delegiert am document registriert (gleiche Begruendung wie beim Prio-Listener
+// oben): die Icons entstehen bei jedem Refresh per innerHTML neu, direkt an
+// ihnen haengende Handler waeren danach weg.
+document.addEventListener("mouseover", ev => {
+  const icon = ev.target.closest ? ev.target.closest("[data-item-id]") : null;
+  if (!icon) return;
+  const id = icon.dataset.itemId;
+  if (id === ttCurrent) return;
+  ttCurrent = id;
+  ttShow(id, ev.clientX, ev.clientY);
+});
+
+document.addEventListener("mouseout", ev => {
+  if (ev.target.closest && ev.target.closest("[data-item-id]")) ttHide();
+});
+
+document.addEventListener("mousemove", ev => {
+  if (ttCurrent !== null && !ttEl().hidden) ttPlace(ev.clientX, ev.clientY);
 });
 
 setInterval(() => {

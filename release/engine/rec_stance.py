@@ -15,11 +15,6 @@ Zwei Vorspruenge mit verschiedenen Aufgaben (Befund 2026-07-17, Live-Fall Gwen):
     Timeline-`totalGold`-Differenz (verdientes Gold) gebaut wurden.
 """
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # nur fuer die Typannotation - kein Laufzeit-Import (Fassade)
-    from .recommend import Weights
-
 
 # fielded_lead-Schwelle: ab dieser gemessenen Item-Gold-Differenz gilt der
 # Vorsprung als aussagekraeftig (Stance vorne/hinten).
@@ -161,12 +156,16 @@ def own_stance(my_scores: dict, enemy_fed: bool,
     return stance, reason + note
 
 
-def _stance_note(stance: str, weights: "Weights") -> str:
+def _stance_note(stance: str) -> str:
     """Zusatz-Hinweis, warum die Item-Empfehlung trotz defensiver Stance NICHT
-    defensiv vorzieht. Nur bei defensiver Stance UND Anzeige-only-Modus der
-    Stance-Schicht (Befund H, review-2026-07-15.md / Befund D, 2026-07-13);
-    sonst leer, damit das Frontend per Falsy-Check rendern kann."""
-    if stance == "defensive" and weights.defensive_stance == 0 and not weights.stance_next:
+    defensiv vorzieht. Nur bei defensiver Stance (Befund H,
+    review-2026-07-15.md / Befund D, 2026-07-13); sonst leer, damit das Frontend
+    per Falsy-Check rendern kann.
+
+    Seit der Entfernung der Stance-Score-Schicht (Testsuite-Review 2026-08-04)
+    gibt es keinen zweiten Modus mehr, in dem defensiv vorgezogen wuerde - die
+    Note haengt darum nur noch an der Stance selbst."""
+    if stance == "defensive":
         return ("Die Item-Empfehlung folgt bewusst weiter der gelernten "
                 "High-Elo-Reihenfolge - defensives Vorziehen hat im Backtest "
                 "auch bei Rueckstand nicht haeufiger gewonnen.")

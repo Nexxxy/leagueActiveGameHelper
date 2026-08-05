@@ -1,6 +1,12 @@
 """Erklaertexte & Item-Tags: leitet aus Tags und benannten Effekten ab, wofuer/
 wogegen ein Item gut ist (explain_item) bzw. ein kurzes Buzzword (_item_tag).
 
+Die Badges tragen ZWEI Achsen (Anzeige-only, kein Scoring):
+- WOGEGEN das Item hilft: `_item_tag` (Anti-Tank, Anti-AD, Crit-DPS, ...)
+- WAS es dir gibt: `_stat_badges` (+HP/+Ruestung/+MR) und `_tag_axis`
+  (off/def/hybrid, steuert die Badge-Farbe)
+`tag_fields` buendelt beide fuer die Empfehlungs-Payload.
+
 Aus recommend.py ausgelagert (Struktur-Review 2026-07-17, Befund S2). Die zuvor
 doppelte Effekt-Regex nutzt jetzt items.effect_names (Befund D4).
 """
@@ -215,6 +221,61 @@ def _item_tag(name: str, role: str | None = None) -> str:
     if "Damage" in tags:
         return "AD-Power"
     return ""
+
+
+# Natur-Achse: Defensiv-Tag -> Kurz-Badge. Feste Reihenfolge (dict-Order), damit
+# die Badge-Folge fuer jedes Item stabil ist: +HP, +Ruestung, +MR.
+_STAT_BADGES = {
+    "Health": "+HP",
+    "Armor": "+Rüstung",
+    "SpellBlock": "+MR",
+}
+
+
+def _stat_badges(name: str) -> list[str]:
+    """ANZEIGE-ONLY: was das Item dir GIBT (defensive Stats), als kurze Badges.
+
+    Zweite Achse neben `_item_tag` (das sagt, WOGEGEN das Item gut ist). Ein
+    Hybrid wie Bloodletter's Curse (AP + HP + MR-Shred) traegt in der Tag-Kette
+    nur "Anti-Tank" - die defensive Haelfte wuerde ohne diese Badges unsichtbar
+    bleiben.
+
+    Keine Unterdrueckungs-Sonderlogik: auch "Tanky/HP" + "+HP" ist gewollt, und
+    Boots mit Armor-Tag (Plated Steelcaps) zeigen "+Ruestung". Unbekanntes Item
+    -> leere Liste. Kein Einfluss auf Scoring."""
+    tags = items.tags_of(name)
+    return [label for tag, label in _STAT_BADGES.items() if tag in tags]
+
+
+def _tag_axis(name: str) -> str:
+    """ANZEIGE-ONLY: Einordnung des Items in offensiv/defensiv/hybrid - Grundlage
+    fuer die BADGE-FARBE im Frontend (der Tag-Text allein verriet sie nicht:
+    "Anti-Tank" ist offensiv, "Anti-AD" defensiv).
+
+    Gleiche Tag-Mengen wie `_item_tag`: "off" (nur AD-/AP-Tags), "def" (nur
+    Defensiv-Tags), "hybrid" (beides), "" (weder/unbekannt). Kein Einfluss auf
+    Scoring - insbesondere NICHT mit `_is_defensive` verwandt."""
+    tags = items.tags_of(name)
+    off = bool(tags & (items.AD_TAGS | items.AP_TAGS))
+    deff = bool(tags & items.DEF_TAGS)
+    if off and deff:
+        return "hybrid"
+    if off:
+        return "off"
+    if deff:
+        return "def"
+    return ""
+
+
+def tag_fields(name: str, role: str | None = None) -> dict:
+    """Alle Anzeige-Tag-Felder eines Items in einem Rutsch - der EINE Ort, an dem
+    Empfehlungs-Dicts ihre Badge-Daten holen (`**tag_fields(...)`).
+
+    Vertrag: {"tag": <Zweck-Buzzword>, "tag_axis": <off|def|hybrid|"">,
+    "stats": [<+HP|+Ruestung|+MR>]}."""
+    return {"tag": _item_tag(name, role=role),
+            "tag_axis": _tag_axis(name),
+            "stats": _stat_badges(name)}
 
 
 def _is_defensive(item_name: str, vs: str) -> bool:

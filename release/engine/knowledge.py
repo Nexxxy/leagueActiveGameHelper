@@ -3,8 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-import yaml
-
+from core import yamlio
 from core.config import ROOT
 
 
@@ -53,14 +52,14 @@ def _latest_builds() -> tuple[str, dict]:
     # Patch-Name aus dem Elternverzeichnis; leer -> "backtest" (gepinnte Quelle
     # ohne Patch-Ordner, nur Backtest/Tests).
     patch = path.parent.name or "backtest"
-    return patch, yaml.safe_load(path.read_text(encoding="utf-8"))
+    return patch, yamlio.load(path)
 
 
 def _overrides() -> dict:
     path = overrides_path()
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return yamlio.load(path) or {}
 
 
 @lru_cache(maxsize=1)

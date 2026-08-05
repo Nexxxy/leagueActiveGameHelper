@@ -13,8 +13,7 @@ Oeffentliche Einstiegspunkte:
 
 from pathlib import Path
 
-import yaml
-
+from core import yamlio
 from core.config import Config
 # `capture` wird hier nicht direkt benutzt, aber bewusst eager mitgeladen: der
 # Release-Smoketest importiert `app.postgame.capture` und wuerde ein fehlendes
@@ -49,7 +48,7 @@ def _load_core_sets(cfg: Config, patch: str) -> dict:
     path = cfg.out_dir / patch / "builds.yaml"
     if not path.exists():
         return {}
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    data = yamlio.load(path) or {}
     champs = data.get("champions", {}) or {}
     out: dict = {}
     for champ, roles in champs.items():

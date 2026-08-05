@@ -5,6 +5,7 @@ Aus recommend.py ausgelagert (Struktur-Review 2026-07-17, Befund S2).
 """
 
 from . import items, profiling
+from .rec_explain import tag_fields
 
 
 # Guenstige Grievous-Komponenten (800 G) je Schadenstyp: wenn man hinten liegt,
@@ -98,8 +99,10 @@ def _antiheal_recommendation(enemy_profiles: list[dict], owned_names: set[str],
     if struggling:
         cheap = _ANTIHEAL_CHEAP.get(my_dmg)
         if cheap and cheap not in owned_names and cheap in items.by_name():
+            # `tag_fields` liefert die beiden Anzeige-Achsen (Farbe + Stat-
+            # Badges); der Zweck-Tag bleibt der kuratierte "Anti-Heal".
             return {"item": cheap, "kind": "situational", "defensive": True,
-                    "antiheal": True, "tag": "Anti-Heal",
+                    "antiheal": True, **tag_fields(cheap), "tag": "Anti-Heal",
                     "reason": (f"Anti-Heal gegen {heal_list} - aber du liegst "
                                f"hinten: nur die guenstige Komponente ({cheap}, "
                                f"800 G), kein teures Item forcieren.")}
@@ -113,7 +116,7 @@ def _antiheal_recommendation(enemy_profiles: list[dict], owned_names: set[str],
     if pick is None:
         return None
     return {"item": pick, "kind": "situational", "defensive": True,
-            "antiheal": True, "tag": "Anti-Heal",
+            "antiheal": True, **tag_fields(pick), "tag": "Anti-Heal",
             "reason": (f"Anti-Heal gegen {heal_list} - niemand im Team hat "
                        f"Grievous Wounds. Reduziert ihre Heilung um 40% "
                        f"(Option, kein Pflichtkauf).")}

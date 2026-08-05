@@ -64,6 +64,14 @@ COMPLETED_SUPPORT_ITEMS = {"Bloodsong", "Celestial Opposition", "Dream Maker",
 # der Empfehlungs-Layer den Besitz ueber owned_ids prueft (robuster als Namen).
 SUPPORT_QUEST_IDS = {3865, 3866, 3867}
 
+# LETZTE Stufe der Questkette vor der Wahl: Bounty of Worlds (3867). Erst ab hier
+# ist die Endform-Wahl ein plausibler NAECHSTER Abschluss - davor (World Atlas /
+# Runic Compass) liegen noch Quest-Stufen dazwischen, und eine Endform-Karte
+# waere eine Empfehlung fuer "irgendwann spaeter" (Nutzer-Entscheid 2026-08-04,
+# plan_next_item_only.md §4.3). Als eigene Konstante statt als Literal, damit
+# Schaerfung und Basis-Erkennung nicht auseinanderlaufen.
+SUPPORT_QUEST_FINAL_ID = 3867
+
 # Das defensive Schild-Item unter den fuenf Endformen (Item-ID 3869). Der
 # Support-Final-Layer bietet es als defensiven Zweitvorschlag an, wenn die Lage
 # defensiv ist und es nicht ohnehin der champion-feste Primaervorschlag ist.
@@ -384,80 +392,6 @@ def _component_discount(item: dict, inventory: Counter) -> int:
     return _component_match(item, inventory)[0]
 
 
-def _finished_targets(owned_ids: list[int]) -> set[str]:
-    """Fertige Items (kein 'into'), zu denen die Inventar-Komponenten fuehren."""
-    targets: set[str] = set()
-    for cid in {str(i) for i in owned_ids}:
-        item = by_id(int(cid))
-        if not item:
-            continue
-        stack, seen = list(item.get("into", [])), set()
-        while stack:
-            fid = stack.pop()
-            if fid in seen:
-                continue
-            seen.add(fid)
-            fitem = by_id(int(fid))
-            if not fitem:
-                continue
-            if fitem.get("into"):
-                stack.extend(fitem["into"])
-            else:
-                targets.add(fid)
-    return targets
-
-
-# Erst ab dieser Komponenten-Groesse gilt ein Kauf als Absichts-Signal:
-# alles bis einschliesslich Pickaxe-Preis (875 G) steckt in so vielen
-# Rezepten, dass es nichts ueber das Ziel-Item verraet.
-MIN_SIGNAL_GOLD = 876
-
-
-def _has_signal_component(comp_names: list[str]) -> bool:
-    lookup = by_name()
-    return any(
-        (entry := lookup.get(n)) is not None
-        and entry[1].get("gold", {}).get("total", 0) >= MIN_SIGNAL_GOLD
-        for n in comp_names
-    )
-
-
-def in_progress(owned_ids: list[int], kb_names=frozenset()) -> dict | None:
-    """Erkennt das Item, das der Spieler laut seinen Komponenten gerade baut.
-
-    Rein aus den Rezepten (Data Dragon), unabhaengig von der Wissensbasis -
-    denn genau die halbfertigen Items sind das staerkste Absichts-Signal.
-    Rueckgabe: bestes Kandidaten-Item {item, remaining, invested, components,
-    meta} oder None. Konfidenz: mindestens eine Komponente >= MIN_SIGNAL_GOLD
-    (alles bis inkl. Pickaxe ist zu mehrdeutig) UND (>=2 investierte
-    Komponenten ODER Item steht im Build der Rolle/kb_names) - so raet weder
-    eine einzelne Pickaxe noch ein Long Sword etwas Falsches.
-    """
-    inv = Counter(str(i) for i in owned_ids)
-    best_key, best = None, None
-    for fid in _finished_targets(owned_ids):
-        if fid in inv:            # schon fertig im Inventar
-            continue
-        fitem = by_id(int(fid))
-        if not fitem:
-            continue
-        invested, comps = _component_match(fitem, inv.copy())
-        if invested <= 0:
-            continue
-        meta = fitem["name"] in kb_names
-        if len(comps) < 2 and not meta:
-            continue
-        if not _has_signal_component(comps):
-            continue
-        remaining = max(0, fitem.get("gold", {}).get("total", 0) - invested)
-        key = (len(comps), invested, -remaining)   # meiste Investition zuerst
-        if best_key is None or key > best_key:
-            best_key = key
-            best = {"item": fitem["name"], "remaining": remaining,
-                    "invested": invested, "components": comps, "meta": meta}
-    return best
-
-
 def is_completed(item_id: int) -> bool:
     """True fuer ein FERTIGES Item (nicht Komponente): kein 'into', >= 2000 G,
     auf Summoner's Rift, keine Boots/Trinkets/Ally-Only-Items. Spiegelt die
@@ -502,6 +436,22 @@ def is_upgraded_boots(item_name: str) -> bool:
     item = entry[1]
     return ("Boots" in item.get("tags", [])
             and item.get("gold", {}).get("total", 0) >= 900)
+
+
+def is_base_boots(item_name: str) -> bool:
+    """True fuer die 300-G-BASIS-Boots (Item 1001 "Boots", 2422 "Slightly
+    Magical Footwear") - das Gegenstueck zu `is_upgraded_boots`.
+
+    Gebraucht von der Anzeige-Regel "nur plausible naechste Kaeufe": wer die
+    Basis-Boots schon traegt, fuer den ist das T2-Upgrade ein plausibler
+    naechster Abschluss - unabhaengig davon, was die gelernte Slot-Verteilung
+    fuer diesen Kaufslot sagt."""
+    entry = by_name().get(item_name)
+    if not entry:
+        return False
+    item = entry[1]
+    return ("Boots" in item.get("tags", [])
+            and item.get("gold", {}).get("total", 0) < 900)
 
 
 def is_valid_sr(name: str) -> bool:
