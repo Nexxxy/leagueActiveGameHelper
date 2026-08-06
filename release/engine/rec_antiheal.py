@@ -5,7 +5,7 @@ Aus recommend.py ausgelagert (Struktur-Review 2026-07-17, Befund S2).
 """
 
 from . import items, profiling
-from .rec_explain import tag_fields
+from .rec_explain import _is_defensive_item, tag_fields
 
 
 # Guenstige Grievous-Komponenten (800 G) je Schadenstyp: wenn man hinten liegt,
@@ -101,7 +101,12 @@ def _antiheal_recommendation(enemy_profiles: list[dict], owned_names: set[str],
         if cheap and cheap not in owned_names and cheap in items.by_name():
             # `tag_fields` liefert die beiden Anzeige-Achsen (Farbe + Stat-
             # Badges); der Zweck-Tag bleibt der kuratierte "Anti-Heal".
-            return {"item": cheap, "kind": "situational", "defensive": True,
+            # `defensive` wird aus dem konkreten Item ABGELEITET statt hart auf
+            # True gesetzt: Anti-Heal ist eine eigene Achse, kein Ersatz fuer
+            # Ruestung/MR (Executioner's Calling und Oblivion Orb sind reine
+            # Schadens-Komponenten, Bramble Vest waere echt defensiv).
+            return {"item": cheap, "kind": "situational",
+                    "defensive": _is_defensive_item(cheap),
                     "antiheal": True, **tag_fields(cheap), "tag": "Anti-Heal",
                     "reason": (f"Anti-Heal gegen {heal_list} - aber du liegst "
                                f"hinten: nur die guenstige Komponente ({cheap}, "
@@ -115,7 +120,11 @@ def _antiheal_recommendation(enemy_profiles: list[dict], owned_names: set[str],
                 next((c for c in candidates if c not in owned_names), None))
     if pick is None:
         return None
-    return {"item": pick, "kind": "situational", "defensive": True,
+    # `defensive` abgeleitet, nicht hart True (s. cheap-Zweig oben): die
+    # Vollitems dieser Liste (Mortal Reminder, Morellonomicon, ...) sind
+    # Schadens-Items mit Grievous-Passive und keine Defensiv-Kaeufe.
+    return {"item": pick, "kind": "situational",
+            "defensive": _is_defensive_item(pick),
             "antiheal": True, **tag_fields(pick), "tag": "Anti-Heal",
             "reason": (f"Anti-Heal gegen {heal_list} - niemand im Team hat "
                        f"Grievous Wounds. Reduziert ihre Heilung um 40% "

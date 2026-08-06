@@ -1113,8 +1113,15 @@ def _has_signal(seq: list) -> bool:
     return bool(seq) and (seq[-1] or 0) > 0
 
 
-def _impact_combined_series(player: dict) -> list:
+def impact_combined_series(player: dict) -> list:
     """Gewichtete Summe der minuten-aufgeloesten Impact-Serien eines Spielers.
+
+    EINE Quelle fuer alle Phasen-Ansichten des kombinierten Impacts: die
+    Sup-vs-Sup-Kachel (`impact_phase_rows`) UND das Duo-Paar der Sektion
+    'Schaden nach Phasen', wenn der eigene Spieler UTILITY spielt (dort ist
+    reiner Champion-Schaden fuer Heiler unfair). Eine zweite Formel daneben waere
+    ein Wartungsrisiko - Gewichte stehen ausschliesslich in
+    `IMPACT_PHASE_SERIES`.
 
     Alle Quellserien sind kumulativ -> die Summe ist es auch. Fehlende/leere
     Serien zaehlen als 0, kuerzere werden mit ihrem letzten Wert fortgeschrieben
@@ -1150,9 +1157,9 @@ def impact_phase_rows(ser: dict, pid: int, opp: int | None) -> list | None:
     bleiben `opp`/`delta` None."""
     players = ser["players"]
     n = ser["n_frames"]
-    me_seq = _impact_combined_series(players.get(pid, {}))
+    me_seq = impact_combined_series(players.get(pid, {}))
     op = players.get(opp, {}) if opp is not None else {}
-    opp_seq = _impact_combined_series(op)
+    opp_seq = impact_combined_series(op)
     if not (me_seq or opp_seq):
         return None
     return phase_gain_pairs(me_seq, opp_seq, n)
@@ -2218,17 +2225,29 @@ def objective_participation(elites: list, kills: list, pid: int, my_team: int,
 FINISHED_GOLD = 2000
 
 
-def build_order_check(kb_order: list, actual_seq: list) -> dict:
+def build_order_check(kb_order: list, actual_seq: list, *,
+                      n_finished: int | None = None) -> dict:
     """Kaufreihenfolge der Core-Items gegen die builds.yaml-Reihenfolge.
 
     `kb_order`: Core-Items in KB-Reihenfolge (nach avg_slot sortiert).
     `actual_seq`: dieselben Core-Items in der TATSAECHLICHEN Fertigstellungs-
-    Reihenfolge des Spielers. Rueckgabe {ok, text}: erste Inversion gegen die
-    KB-Ordnung -> 'Rabadon vor Dusk (KB: Dusk zuerst)', sonst 'Reihenfolge ok'.
-    Weniger als zwei gemeinsame Items -> ok (nichts zu vergleichen)."""
+    Reihenfolge des Spielers. `n_finished`: Gesamtzahl der Fertig-Items (Core
+    UND Nicht-Core) - trennt "zu frueh zum Urteilen" von "am Core vorbei
+    gebaut". Rueckgabe {ok, text} plus optional `neutral`:
+
+    - mind. zwei gemeinsame Core-Items: erste Inversion gegen die KB-Ordnung
+      -> ok False, 'Rabadon vor Dusk (KB: Dusk zuerst)', sonst 'Reihenfolge ok'.
+    - kein Core-Item fertig, aber mind. zwei Fertig-Items -> ok False,
+      'Kein Core-Item gebaut' (der Spieler baut komplett am Core vorbei).
+    - sonst (ein einzelnes Core-Item, hoechstens ein Fertig-Item oder
+      `n_finished` unbekannt) -> neutral True, 'Reihenfolge nicht bewertbar':
+      es gibt schlicht nichts zu vergleichen."""
     common = [x for x in actual_seq if x in kb_order]
     if len(common) < 2:
-        return {"ok": True, "text": "Reihenfolge ok"}
+        if not common and (n_finished or 0) >= 2:
+            return {"ok": False, "text": "Kein Core-Item gebaut"}
+        return {"ok": True, "neutral": True,
+                "text": "Reihenfolge nicht bewertbar"}
     rank = {name: i for i, name in enumerate(kb_order)}
     for i in range(len(common)):
         for j in range(i + 1, len(common)):

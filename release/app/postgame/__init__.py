@@ -454,7 +454,8 @@ def _build_eval(pid, cmap: dict, seen_by_pid: dict, core_by_pid: dict) -> dict:
          if n in core or (g or 0) >= analysis.FINISHED_GOLD),
         key=lambda t: t[1])
     actual_core = [n for n, _m in finished_named if n in core]
-    order = analysis.build_order_check(core, actual_core)
+    order = analysis.build_order_check(core, actual_core,
+                                       n_finished=len(finished_named))
     my_min = [m for _n, m in finished_named]
     opp = cmap.get(pid)
     opp_min = _finished_minutes(seen_by_pid.get(opp, {}),
@@ -486,6 +487,26 @@ def _role_dmg_pair(ser: dict, ranked_names: dict, cmap: dict, my_team: int,
             "rows": analysis.phase_gain_pairs(me_dmg, opp_dmg, n)}
 
 
+def _duo_heal_totals(impact_raw: dict, me_pid, opp_pid) -> dict | None:
+    """Heilungs-/Shield-ENDSUMMEN beider Supports fuer die Fusszeile der
+    Impact-Phasen-Karte (Sektion 'Schaden nach Phasen', UTILITY-Variante).
+
+    Heilung/Schilde liegen in den Timeline-Frames NICHT je Minute vor - nur als
+    Match-Endwert (`impact_raw[pid]["healShield"]`). Darum stehen sie nicht in
+    den Phasen-Balken, sondern als ehrlicher Gesamtwert darunter. Rueckgabe
+    {me_heal, opp_heal} oder **None**, wenn die Rohwerte fehlen (key-freier Pfad)
+    oder einer der beiden pids nicht darin steht - dann entfaellt nur die
+    Fusszeile, die Balken bleiben."""
+    if not impact_raw:
+        return None
+    me_raw = impact_raw.get(me_pid)
+    opp_raw = impact_raw.get(opp_pid) if opp_pid is not None else None
+    if me_raw is None or opp_raw is None:
+        return None
+    return {"me_heal": me_raw.get("healShield", 0) or 0,
+            "opp_heal": opp_raw.get("healShield", 0) or 0}
+
+
 def _attach_phase4b(*, team_players: list, ser: dict, cmap: dict,
                     pid_team: dict, my_team: int, me_pid, opp_pid,
                     ranked_names: dict, core_sets: dict, seen_by_pid: dict,
@@ -500,13 +521,23 @@ def _attach_phase4b(*, team_players: list, ser: dict, cmap: dict,
 
     # --- Sektion 1: Schaden je Phase (nur mit Schaden-Daten) ----------------
     if has_damage:
-        me_dmg = ser["players"].get(me_pid, {}).get("dmg", [])
-        opp_dmg = ser["players"].get(opp_pid, {}).get("dmg", []) if opp_pid else []
+        me_role = ranked_names.get(me_pid, {}).get("role")
+        players = ser["players"]
+        # Support-Matchup (Nutzer-Entscheid 2026-08-06): Zwei Supports auf
+        # reinem Champion-Schaden zu vergleichen benachteiligt Heiler per
+        # Design. Bei UTILITY-Me speist darum der KOMBINIERTE Impact das
+        # Duo-Paar (Schaden + Erlitten + CC·Gewicht) - derselbe Helfer und
+        # dieselben Gewichte wie in der Sup-vs-Sup-Kachel, keine zweite Formel.
+        # Alle anderen Rollen bleiben bei den reinen Schaden-Serien.
+        is_sup = me_role == "UTILITY"
+        pick = (analysis.impact_combined_series if is_sup
+                else lambda p: p.get("dmg", []))
+        me_seq = pick(players.get(me_pid, {}))
+        opp_seq = pick(players.get(opp_pid, {})) if opp_pid else []
         # Zusaetzliche Carry-Lane-Paare (ADC=BOTTOM, MID=MIDDLE) - genau die
         # Rollen, fuer die 'hat er early/mid Schaden gemacht?' am relevantesten
         # ist. Eigene Rolle nicht doppeln (steht schon im Me-Paar), fehlender
         # Rolleninhaber/Gegenpart -> Paar weglassen (nicht leer rendern).
-        me_role = ranked_names.get(me_pid, {}).get("role")
         role_pairs = []
         for role in ("BOTTOM", "MIDDLE"):
             if role == me_role:
@@ -514,12 +545,20 @@ def _attach_phase4b(*, team_players: list, ser: dict, cmap: dict,
             pair = _role_dmg_pair(ser, ranked_names, cmap, my_team, role, n)
             if pair:
                 role_pairs.append(pair)
-        extra["damage_phases"] = {
-            "duo": analysis.phase_gain_pairs(me_dmg, opp_dmg, n),
+        phases = {
+            "duo": analysis.phase_gain_pairs(me_seq, opp_seq, n),
             "role_pairs": role_pairs,
             "team": analysis.phase_gain_pairs(tvt.get("dmg", {}).get("me", []),
                                               tvt.get("dmg", {}).get("opp", []), n),
         }
+        # Nur im UTILITY-Fall kommen Schluessel dazu - sonst bleibt das Payload
+        # byte-identisch zu vorher (Abwaertskompatibilitaet der Renderer).
+        if is_sup:
+            phases["duo_kind"] = "impact"
+            totals = _duo_heal_totals(impact_raw, me_pid, opp_pid)
+            if totals:
+                phases["duo_totals"] = totals
+        extra["damage_phases"] = phases
 
     # --- Sektion 2: Composite-Impact (nur mit impact_raw) -------------------
     # Die Scores werden hier EINMAL berechnet und weiter unten auch an die

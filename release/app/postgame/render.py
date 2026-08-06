@@ -389,12 +389,23 @@ def _phase_bars(deltas: list) -> str:
 
 def _build_eval_html(p: dict) -> str:
     """Build-Eval Stufe 1 (Reihenfolge) + Stufe 2 (Timing vs. Gegenpart), §8b.
-    Nur wenn ein KB-Core existiert; sonst leer (kein Vergleichsmassstab)."""
+    Nur wenn ein KB-Core existiert; sonst leer (kein Vergleichsmassstab).
+
+    Der neutrale Reihenfolge-Zustand ('nicht bewertbar', zu wenige fertige
+    Core-Items) bekommt KEINEN Chip: er ist ein Nicht-Befund und soll den
+    Verdikt-Slot nicht belegen. Der 'Build'-Header und die Timing-Chips
+    bleiben stehen. 'ok' (gruen), Inversion und 'Kein Core-Item gebaut'
+    (rot) rendern unveraendert; alte persistierte Reports ohne den
+    `neutral`-Key laufen ueber denselben gruen/rot-Pfad wie bisher."""
     be = p.get("build_eval")
     if not be or not be.get("has_core"):
         return ""
     order = be["order"]
-    ocls = "tag-strength" if order["ok"] else "tag-weak"
+    if order.get("neutral"):
+        order_html = ""
+    else:
+        ocls = "tag-strength" if order["ok"] else "tag-weak"
+        order_html = f'<span class="{ocls}">{_esc(order["text"])}</span>'
     timing = be.get("timing") or []
     if timing:
         chips = []
@@ -408,7 +419,7 @@ def _build_eval_html(p: dict) -> str:
         timing_html = '<span class="muted">keine Fertig-Items</span>'
     return (f'<div class="be">'
             f'<div class="be-order"><span class="be-h">Build</span>'
-            f'<span class="{ocls}">{_esc(order["text"])}</span></div>'
+            f'{order_html}</div>'
             f'<div class="be-timing">{timing_html}</div></div>')
 
 
@@ -541,9 +552,17 @@ def _gank_strip(p: dict, duration_min: float) -> str:
 
 def _impact_tile_row(champ: str, comps: dict, scale: float, lab_cls: str,
                      badge: str = "") -> str:
-    """Eine Zeile der Impact-Kachel: Champ-Label + Segment-Balken (+ Quote)."""
+    """Eine Zeile der Impact-Kachel: Champ-Label + Segment-Balken.
+
+    `badge` (Quote) wird NICHT hinter den Balken gehaengt, sondern an
+    `_impact_bar` durchgereicht und landet dort - `badge_cell=False` - in der
+    Zwischenzeile unter dem Balken, vor dem Save-Chip. In der schmalen Kachel
+    wuerde schon eine Badge-Zelle in der Balkenzeile den Track dieser Zeile
+    sichtbar gegenueber der Gegenpart-Zeile verkuerzen; die Segmentlaengen waeren
+    dann nicht mehr vergleichbar."""
     return (f'<div class="tci-row"><span class="tci-lab {lab_cls}">'
-            f'{_esc(champ)}</span>{_impact_bar(comps, scale)}{badge}</div>')
+            f'{_esc(champ)}</span>'
+            f'{_impact_bar(comps, scale, badge, badge_cell=False)}</div>')
 
 
 def _impact_phase_bars(rows: list | None) -> str:
@@ -575,10 +594,14 @@ def _impact_tile(p: dict) -> str:
     Composite-Impact (Schaden + Heilung/Shield + Getankt + Utility) stand bis
     dahin nur in der eigenen Sektion. Bausteine sind DIESELBEN wie dort
     (`_IMPACT_SEG`, `_impact_bar` inkl. Save-Chip, `_quote_badge`,
-    `_impact_legend`); kachel-lokal ist nur der Massstab: groesster Total des
-    Paares, damit der Balken die schmale Kartenbreite ausnutzt. Ohne
-    Impact-Daten (key-freier Pfad) fehlt `impact_pair` -> die Kachel entfaellt
-    ersatzlos (der Disclaimer erklaert das Fehlen global).
+    `_impact_legend`); kachel-lokal sind nur der Massstab (groesster Total des
+    Paares, damit der Balken die schmale Kartenbreite ausnutzt) und die Regel,
+    dass hier AUCH das Quote-Badge in die Zwischenzeile wandert (`.tci-row`, s.
+    `_impact_tile_row`). Die beiden Zeilen teilen sich Massstab UND
+    Track-Breite - erst beides zusammen macht die Segmentlaengen von eigenem
+    Support und Gegenpart vergleichbar. Ohne Impact-Daten (key-freier Pfad)
+    fehlt `impact_pair` -> die Kachel entfaellt ersatzlos (der Disclaimer
+    erklaert das Fehlen global).
 
     Unter den Gesamt-Balken steht - sofern die Minuten-Serien vorliegen
     (`phase_rows`, Erweiterung 2026-07-25) - EINE Early/Mid/Late-Gruppe mit dem
@@ -823,10 +846,15 @@ def _phase_pair_bars(rows: list, me_label: str, opp_label: str) -> str:
 
 
 def _phase_pair_card(title: str, rows: list, me_label: str,
-                     opp_label: str) -> str:
-    """Eine Schaden-je-Phase-Karte (frei betitelt) + Paar-Balken (me vs. opp)."""
+                     opp_label: str, foot: str = "") -> str:
+    """Eine Schaden-je-Phase-Karte (frei betitelt) + Paar-Balken (me vs. opp).
+
+    `foot` (optional) haengt eine Fusszeile unter die Balken - genutzt nur von
+    der Impact-Variante des Me-Paars fuer die Heilungs-/Shield-Endsummen, die
+    minuten-genau nicht vorliegen."""
+    foot_html = f'<p class="note">{_esc(foot)}</p>' if foot else ""
     return (f'<div class="card"><div class="mini-h">{_esc(title)}</div>'
-            f'{_phase_pair_bars(rows, me_label, opp_label)}</div>')
+            f'{_phase_pair_bars(rows, me_label, opp_label)}{foot_html}</div>')
 
 
 def _damage_phase_section(report: dict) -> str:
@@ -836,10 +864,21 @@ def _damage_phase_section(report: dict) -> str:
     me_champ = report["me"]["champ"]
     opp = next((p["counterpart"] for p in report["team"] if p["is_me"]), None)
     opp_champ = opp["champ"] if opp else "Gegenpart"
+    # Me-Paar: bei UTILITY-Me traegt `duo` den kombinierten Impact statt reinem
+    # Schaden (`duo_kind`, s. postgame._attach_phase4b) - Titel und Fusszeile
+    # muessen das benennen, sonst liest sich die Karte als Schadensvergleich.
+    if dp.get("duo_kind") == "impact":
+        duo_title = f"Impact je Phase — {me_champ} vs. {opp_champ}"
+        tot = dp.get("duo_totals") or {}
+        duo_foot = (f'Heilung/Shield gesamt: {_fmt(tot["me_heal"])} vs. '
+                    f'{_fmt(tot["opp_heal"])}') if tot else ""
+    else:
+        duo_title = f"Schaden je Phase — {me_champ} vs. {opp_champ}"
+        duo_foot = ""
     # Reihenfolge: Me-Paar, dann Carry-Lane-Paare (ADC, MID - je nur falls nicht
     # der eigene Spieler und Gegenpart vorhanden), zuletzt Team vs. Team.
-    cards = [_phase_pair_card(f"Schaden je Phase — {me_champ} vs. {opp_champ}",
-                              dp["duo"], me_champ, opp_champ)]
+    cards = [_phase_pair_card(duo_title, dp["duo"], me_champ, opp_champ,
+                              duo_foot)]
     for pair in dp.get("role_pairs", []):
         cards.append(_phase_pair_card(
             f'Schaden je Phase — {pair["me_champ"]} vs. {pair["opp_champ"]}',
@@ -857,12 +896,32 @@ _IMPACT_SEG = (("damage", "Schaden", "var(--accent)"),
                ("utility", "Utility (CC+Saves)", "var(--util)"))
 
 
-def _impact_bar(comps: dict, scale: float) -> str:
+def _impact_bar(comps: dict, scale: float, badge: str = "",
+                badge_cell: bool = True) -> str:
     """Segmentierter Balken (Schaden/Heilung/Getankt/Utility) fuer einen Spieler.
 
     Utility fasst CC-Zeit + gerettete Leben in EINEM Segment zusammen; bei
-    `saves > 0` haengt zusaetzlich ein Text-Chip ('N× Leben gerettet') an der
-    Zeile (die Save-Zahl ist in `comps` erhalten)."""
+    `saves > 0` kommt zusaetzlich ein Text-Chip ('N× Leben gerettet') dazu (die
+    Save-Zahl ist in `comps` erhalten).
+
+    Die Balkenzeile besteht immer aus Track (`.imp-bar`, flexibel) + Total
+    (`.imp-tot`, feste schmale Spalte, rechtsbuendig). Alles Weitere haengt an
+    `badge_cell`:
+
+    * `badge_cell=True` (Sektion 05): danach folgt IMMER eine Badge-Zelle
+      (`.imp-bcell`, feste Breite) mit `badge` (dem Quote-Badge) - auch leer, auf
+      der Gegenpart-Seite. Feste Breiten fuer beide Spalten sind der Grund, warum
+      die Tracks aller Zeilen exakt gleich lang bleiben; nur dann sind die
+      Segmentlaengen zweier Zeilen ueberhaupt vergleichbar.
+    * `badge_cell=False` (schmale Sup-vs-Sup-Kachel): keine Badge-Zelle - dort
+      wuerde schon das Badge allein den Track sichtbar verkuerzen. Das Badge
+      wandert stattdessen in die Zwischenzeile, VOR den Save-Chip.
+
+    Die Zwischenzeile `.imp-chip-row` folgt - nur wenn sie Inhalt hat - als
+    letztes Geschwister (Nutzer-Feedback 2026-08-06). Der Container umbricht sie
+    per CSS in eine eigene Zeile unter dem Balken, linksbuendig zum
+    Track-Anfang; ohne Inhalt entfaellt das Element ersatzlos und kostet keine
+    Hoehe."""
     segs = []
     for key, _lab, col in _IMPACT_SEG:
         w = 100 * (comps.get(key, 0) or 0) / scale
@@ -871,8 +930,12 @@ def _impact_bar(comps: dict, scale: float) -> str:
     saves = comps.get("saves", 0) or 0
     chip = (f'<span class="imp-chip">{saves}× Leben gerettet</span>'
             if saves > 0 else "")
+    cell = f'<span class="imp-bcell">{badge}</span>' if badge_cell else ""
+    below = ("" if badge_cell else badge) + chip
+    row2 = f'<span class="imp-chip-row">{below}</span>' if below else ""
     return (f'<div class="imp-bar">{"".join(segs)}</div>'
-            f'<span class="imp-tot">{_fmt(comps.get("total", 0))}</span>{chip}')
+            f'<span class="imp-tot">{_fmt(comps.get("total", 0))}</span>'
+            f'{cell}{row2}')
 
 
 def _impact_legend(extra_cls: str = "") -> str:
@@ -913,16 +976,18 @@ def _impact_section(report: dict) -> str:
     rows = []
     for r in report["scoreboard"]:
         me, opp = r["me"], r["opp"]
-        me_bar = (_impact_bar(scores[me["pid"]], scale)
+        # Das Quote-Badge geht IN die Badge-Zelle des Balkens (nicht dahinter),
+        # damit alle Tracks einer Spalten-Seite gleich breit bleiben.
+        badge = _quote_badge(quotes.get(me["pid"])) if me else ""
+        me_bar = (_impact_bar(scores[me["pid"]], scale, badge)
                   if me and me["pid"] in scores else '<span class="muted">—</span>')
         opp_bar = (_impact_bar(scores[opp["pid"]], scale)
                    if opp and opp["pid"] in scores else '<span class="muted">—</span>')
-        badge = _quote_badge(quotes.get(me["pid"])) if me else ""
         rows.append(
             f'<div class="imp-row"><span class="imp-role">'
             f'{_esc(r["role"].title())}</span>'
             f'<div class="imp-side"><span class="imp-champ">'
-            f'{_esc(me["champ"]) if me else "—"}</span>{me_bar}{badge}</div>'
+            f'{_esc(me["champ"]) if me else "—"}</span>{me_bar}</div>'
             f'<div class="imp-side"><span class="imp-champ">'
             f'{_esc(opp["champ"]) if opp else "—"}</span>{opp_bar}</div></div>')
     # Zusammenfassung: groesster Rueckstand (niedrigste Quote < 1) zum Gegenpart.
@@ -1229,7 +1294,11 @@ def render_html(report: dict) -> str:
             "Schaden nach Phasen",
             "Schaden an Champions je Spielphase (Early 0–10 / Mid 10–20 / "
             "Late 20+): du gegen deinen Rollen-Gegenpart und dein Team gegen das "
-            "gegnerische. Phasen-Zuwachs, nicht kumuliert.",
+            "gegnerische. Phasen-Zuwachs, nicht kumuliert. Spielst du Support, "
+            "zeigt deine eigene Karte statt Schaden den kombinierten Impact "
+            "(Schaden + erlittener Schaden + CC) — reiner Champion-Schaden wäre "
+            "für ein Support-Matchup unfair; Heilung/Schilde liegen je Minute "
+            "nicht vor und stehen darum nur als Gesamtwert unter der Karte.",
             _damage_phase_section(report)))
     if report.get("impact"):
         specs.append((
@@ -1526,18 +1595,37 @@ a{color:var(--accent);}
 
 /* Phase 4b: Composite-Impact (Segment-Balken) */
 .imp-legend{display:flex;gap:14px;margin-bottom:12px;flex-wrap:wrap;}
-.imp-row{display:grid;grid-template-columns:64px 1fr 1fr;align-items:center;gap:12px;
+.imp-row{display:grid;grid-template-columns:64px 1fr 1fr;align-items:start;gap:12px;
   margin-bottom:8px;}
 .imp-role{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;
-  text-transform:uppercase;color:var(--accent);font-weight:600;}
-.imp-side{display:flex;align-items:center;gap:8px;min-width:0;}
+  text-transform:uppercase;color:var(--accent);font-weight:600;padding-top:1px;}
+/* Die Seite umbricht: Balkenzeile oben, Chip-Zeile darunter (s. .imp-chip-row). */
+.imp-side{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;
+  row-gap:4px;}
 .imp-champ{font-size:12px;font-weight:650;width:74px;flex:0 0 auto;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .imp-bar{flex:1 1 auto;display:flex;height:14px;border-radius:4px;overflow:hidden;
   background:var(--card-2);border:1px solid var(--line);min-width:20px;}
 .imp-bar i{height:100%;}
+/* Schmale FESTE Spalten fuer Total (rechtsbuendig) und Quote-Badge: nur so
+   fluchten Zahlen und Badges ueber alle Zeilen UND alle Tracks (.imp-bar,
+   flex:1) sind exakt gleich lang - Voraussetzung dafuer, dass sich die
+   Segmentlaengen zweier Zeilen vergleichen lassen. Eine per-Zeile berechnete
+   auto-Spalte koennte das nicht, weil jede Zeile ein eigener Flex-Kontext ist.
+   Zusammen kosten die beiden Spalten ~100px; der Balken bleibt trotzdem lang,
+   weil der Save-Chip in der Zwischenzeile lebt und den Track nicht verkuerzt. */
 .imp-tot{font-family:var(--mono);font-size:11px;color:var(--ink-2);
-  font-variant-numeric:tabular-nums;flex:0 0 auto;}
+  font-variant-numeric:tabular-nums;flex:0 0 46px;text-align:right;
+  white-space:nowrap;}
+/* Badge-Zelle; wird auf der Gegenpart-Seite LEER mitgerendert, damit die
+   Spaltenstruktur ueber alle Zeilen konstant ist. */
+.imp-bcell{flex:0 0 52px;display:flex;align-items:center;}
+/* Zwischenzeile unter dem Balken (Save-Chip, in der Sup-Kachel zusaetzlich das
+   Quote-Badge): erzwungener Flex-Umbruch, linksbuendig mit der Track-Kante
+   (Einzug = Champ-Label 74px + 8px gap). Der Chip haengt bewusst NICHT in der
+   Balkenzeile - dort wuerde er den Track dieser Zeile verkuerzen. */
+.imp-chip-row{flex:0 0 100%;margin-left:82px;display:flex;align-items:center;
+  gap:6px;}
 .imp-chip{flex:0 0 auto;font-size:10px;font-weight:600;line-height:1;
   padding:3px 7px;border-radius:999px;background:var(--util);color:#fff;
   white-space:nowrap;}
@@ -1638,11 +1726,17 @@ a{color:var(--accent);}
 .tci-h{font-family:var(--mono);font-size:10px;letter-spacing:.06em;
   text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
 .tci-legend{gap:10px;margin-bottom:8px;}
-.tci-row{display:flex;align-items:center;gap:8px;margin-bottom:5px;}
+/* Die Kachel ist nur halb so breit wie Sektion 05 - hier verschiebt schon eine
+   Badge-Zelle den Balken sichtbar. Darum traegt die Balkenzeile nur Label +
+   Track + Total (feste 46px), und AUCH das Quote-Badge wandert in die
+   Zwischenzeile (vor den Chip); beide Sup-Tracks sind damit exakt gleich lang. */
+.tci-row{display:flex;align-items:center;gap:8px;margin-bottom:5px;
+  flex-wrap:wrap;row-gap:4px;}
 .tci-lab{flex:0 0 62px;font-size:11.5px;font-weight:600;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;}
 .tci-me{color:var(--accent);}
 .tci-opp{color:var(--even);}
+.tci-row .imp-chip-row{margin-left:70px;}   /* 62px Label + 8px gap */
 .tci .imp-chip{font-size:9.5px;padding:2px 6px;}
 /* Impact-Phasen-Balken der Kachel (kombinierter Impact je Early-Mid-Late) */
 .tcp{margin-top:9px;}

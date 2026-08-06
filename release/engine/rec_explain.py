@@ -279,8 +279,39 @@ def tag_fields(name: str, role: str | None = None) -> dict:
 
 
 def _is_defensive(item_name: str, vs: str) -> bool:
-    """vs: 'ad' oder 'ap' - passt das Item gegen diesen Schadenstyp?"""
+    """vs: 'ad' oder 'ap' - passt das Item gegen diesen Schadenstyp?
+
+    Die PASSENDE Resistenz zaehlt IMMER (Armor gegen ad, SpellBlock gegen ap),
+    auch an einem Item mit Schadens-Tags: Zhonya's Hourglass und Sunfire Aegis
+    bleiben defensiv. Blosse `Health` zaehlt NUR, wenn das Item KEINE
+    Offensiv-Tags traegt (`items.AD_TAGS | items.AP_TAGS`) - Warmog's Armor ja,
+    Liandry's Torment / Riftmaker / Trinity Force / Titanic Hydra nein.
+
+    WARUM die Health-Einschraenkung: ohne sie gilt jedes Schadens-Item mit
+    HP-Nebenstat als "defensiv". Es unterdrueckt dann den reservierten
+    Defensiv-Slot (`rec_situational._reserve_defensive` findet ein vermeintlich
+    defensives Item im Block und haengt keine echte Option mehr an), und der
+    personalisierte Todes-Hinweis ("... macht dich ueberlebensfaehiger") landet
+    an einem reinen Schadens-Item. Gleiche Tag-Mengen wie `_item_tag`/`_tag_axis`.
+    """
     tags = items.tags_of(item_name)
-    if vs == "ad":
-        return bool(tags & {"Armor"}) or "Health" in tags
-    return bool(tags & {"SpellBlock"}) or "Health" in tags
+    key = "Armor" if vs == "ad" else "SpellBlock"
+    if key in tags:
+        return True
+    return "Health" in tags and not tags & (items.AD_TAGS | items.AP_TAGS)
+
+
+def _is_defensive_item(item_name: str) -> bool:
+    """Schadenstyp-freie Schwester von `_is_defensive`: taugt das Item
+    UEBERHAUPT als defensive Option?
+
+    Dieselbe Regel ohne AD/AP-Richtung - eine Resistenz (Armor ODER SpellBlock)
+    zaehlt immer, blosse `Health` nur ohne Offensiv-Tags. Gebraucht ueberall
+    dort, wo bisher `items.DEF_TAGS` als Filter stand und der Schadenstyp noch
+    nicht feststeht: die Quellen des reservierten Defensiv-Slots
+    (`rec_situational._behind_row`/`_pool_def_row`) und das `defensive`-Flag der
+    Anti-Heal-Schicht. `DEF_TAGS` allein liesse Liandry's & Co. wieder herein."""
+    tags = items.tags_of(item_name)
+    if tags & {"Armor", "SpellBlock"}:
+        return True
+    return "Health" in tags and not tags & (items.AD_TAGS | items.AP_TAGS)
