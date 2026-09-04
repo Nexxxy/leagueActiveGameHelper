@@ -23,6 +23,15 @@ verdrahtet sie nur, die Logik bleibt ohne HTTP testbar):
      dem Riot-Client nachladen (Match-ID = `<PLATFORM>_<gameid>`) - ohne
      Capture, ohne Resolver, ohne Identitaet.
 
+  5. **Fix** (`start_fix`): einen Report, der mit einer aelteren
+     `postgame.REPORT_VERSION` gebaut wurde, mit dem aktuellen Generator neu
+     erzeugen. Nutzt denselben Weg wie der Retry, nur mit bereits bekannter
+     Match-ID (kein Resolver).
+
+  6. **Loeschen** (`delete_game`): ein Spiel endgueltig aus der History
+     nehmen - Report-HTML(s) samt Trend-Records, ohne Rueckfrage und ohne die
+     Riot-Rohdaten im Shard-Store anzutasten.
+
 Deckt ein Report dasselbe Spiel ab wie ein anderer (Doppel-Capture des
 Watchers), fuehren Retry/Load die beiden zusammen: es bleibt genau EINE Datei je
 Spiel (s. `_rebuild_report`, `_mark_duplicates`).
@@ -39,7 +48,7 @@ from html import unescape
 from pathlib import Path
 
 from core.cacheio import read_json
-from .postgame import enrich, fetch, trend
+from .postgame import REPORT_VERSION, enrich, fetch, trend
 
 # Wie viele Spiele die History maximal zeigt (Nutzer-Wunsch: die letzten 20).
 DEFAULT_LIMIT = 20
@@ -157,44 +166,92 @@ def _sniff_status(path: Path) -> str:
 # Roster-Sektion listet alle 10 Champions, und die eigene Team-Karte ist mit
 # dem DU-Badge markiert. Reine String-/Regex-Suche wie beim Status-Sniffing -
 # ein HTML-Parser waere fuer zwei feste Markup-Stellen unverhaeltnismaessig.
+#
+# Dieselbe Sektion traegt auch die SPIELERNAMEN (`ro-name`) - fuer Alt-Reports
+# ohne `players` im Record sind sie die einzige Namensquelle des Spieler-Filters
+# (s. `_player_in_game`). Sie kommen aus `render._disp_name`, also ohne Tagline.
+#
+# Und sie traegt die ZUORDNUNG: jede `ro-row` ist ein Rollen-Paar (eigene Seite
+# `ro-me` vs. Gegenseite `ro-opp`), also Name -> Champion -> Rolle -> Team. Fuer
+# Alt-Records ohne `participants` ist das die einzige Quelle, um die History-Zeile
+# auf einen gefilterten Mitspieler umzurechnen (s. `_reproject_row`).
 _RO_CHAMP = re.compile(r'<span class="ro-champ">([^<]*)</span>')
+_RO_NAME = re.compile(r'<span class="ro-name">([^<]*)</span>')
+_RO_ROW = re.compile(r'<div class="ro-row">'
+                     r'<span class="ro-role">([^<]*)</span>'
+                     r'<span class="ro-side ro-me">(.*?)</span>'
+                     r'<span class="ro-vs">'
+                     r'.*?<span class="ro-side ro-opp">(.*?)</span></div>')
 _ME_CHAMP = re.compile(r'<div class="tc-champ">([^<]*)'
                        r'<span class="me-badge">')
 
 # Platzhalter, die `render._roster_row` fuer eine fehlende Seite schreibt.
 _RO_PLACEHOLDER = frozenset({"", "—"})
 
-# (Pfad -> (mtime, (roster, champ))): dasselbe mtime-Cache-Muster wie beim
-# Status-Sniffing - der Retry-Pfad liest die Datei sonst je Versuch neu.
+# (Pfad -> (mtime, (roster, champ, names, pairs))): dasselbe mtime-Cache-Muster
+# wie beim Status-Sniffing - der Retry-Pfad liest die Datei sonst je Versuch neu.
 _ROSTER_CACHE: dict[str, tuple[float, tuple]] = {}
 
 
-def _sniff_roster(path: Path) -> tuple[list, str | None]:
-    """(Roster, eigener Champion) aus einer gerenderten Report-HTML.
+def _roster_pairs(html_text: str) -> list:
+    """Teilnehmer der Roster-Sektion mit Zuordnung: `{name, champ, role, ally}`.
+
+    Bewusst dieselbe Form wie das Record-Feld `participants` - der Fallback in
+    `_reproject_row` kann so ohne Sonderfall dieselbe Suche fahren. `ally` = die
+    `ro-me`-Seite (eigenes Team) True, die `ro-opp`-Seite False; die Rolle wird
+    aufs Riot-Format hochgestellt (der Renderer schreibt sie `.title()`-cased).
+    Eintraege ohne Namen oder mit Platzhalter-Champion (fehlender Gegenpart)
+    fallen raus - halbe Zuordnungen taugen nicht zum Umrechnen."""
+    out = []
+    for role, me_side, opp_side in _RO_ROW.findall(html_text):
+        role_key = unescape(role).strip().upper() or None
+        for blob, ally in ((me_side, True), (opp_side, False)):
+            name_m = _RO_NAME.search(blob)
+            champ_m = _RO_CHAMP.search(blob)
+            name = unescape(name_m.group(1)).strip() if name_m else ""
+            champ = unescape(champ_m.group(1)).strip() if champ_m else ""
+            if not name or champ in _RO_PLACEHOLDER:
+                continue
+            out.append({"name": name, "champ": champ, "role": role_key,
+                        "ally": ally})
+    return out
+
+
+def _sniff_roster(path: Path) -> tuple[list, str | None, list, list]:
+    """(Roster, eigener Champion, Spielernamen, Teilnehmer-Paare) aus einer
+    gerenderten Report-HTML.
 
     Roster = die Champions der Roster-Sektion (bis zu 10, Platzhalter fuer
     fehlende Gegenparts fliegen raus); Champion = der Champ der eigenen
-    Team-Karte (DU-Badge). Unlesbare/fremde HTML -> ([], None)."""
+    Team-Karte (DU-Badge); Spielernamen = die `ro-name`-Spans derselben Sektion,
+    OHNE Tagline (der Renderer kuerzt sie); Teilnehmer-Paare = dieselben Namen
+    MIT Champion/Rolle/Seite (s. `_roster_pairs`). Ein Datei-Read fuer alle vier
+    Merkmale. Unlesbare/fremde HTML -> ([], None, [], [])."""
     try:
         mtime = path.stat().st_mtime
     except OSError:
-        return [], None
+        return [], None, [], []
     key = str(path)
     with _SNIFF_LOCK:
         hit = _ROSTER_CACHE.get(key)
     if hit is not None and hit[0] == mtime:
-        return list(hit[1][0]), hit[1][1]
+        return (list(hit[1][0]), hit[1][1], list(hit[1][2]),
+                [dict(p) for p in hit[1][3]])
     try:
         html_text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return [], None
+        return [], None, [], []
     roster = [unescape(m).strip() for m in _RO_CHAMP.findall(html_text)]
     roster = [c for c in roster if c not in _RO_PLACEHOLDER]
+    names = [unescape(m).strip() for m in _RO_NAME.findall(html_text)]
+    names = [n for n in names if n]
+    pairs = _roster_pairs(html_text)
     me = _ME_CHAMP.search(html_text)
     champ = unescape(me.group(1)).strip() if me else None
     with _SNIFF_LOCK:
-        _ROSTER_CACHE[key] = (mtime, (list(roster), champ))
-    return roster, champ
+        _ROSTER_CACHE[key] = (mtime, (list(roster), champ, list(names),
+                                      [dict(p) for p in pairs]))
+    return roster, champ, names, pairs
 
 
 # ============================================================================
@@ -422,7 +479,7 @@ def _sniffed_pairs(cfg, pairs: list) -> list:
             out.append((row, rec))
             continue
         path = cfg.postgame_out_dir / f"{row['match_id']}.html"
-        roster, champ = _sniff_roster(path)
+        roster, champ, _names, _pairs = _sniff_roster(path)
         out.append((row, {"roster": roster, "champ": champ} if roster else rec))
     return out
 
@@ -444,6 +501,21 @@ def _mark_duplicates(pairs: list, has_key: bool) -> None:
             row["duplicate_of"] = best[0]["match_id"]
             if has_key and not row["retry_running"]:
                 row["retryable"] = True
+
+
+def _fix_match_id(path: Path, rec: dict) -> str | None:
+    """Echte Match-ID einer Zeile - oder None, wenn sie unbekannt ist.
+
+    Zwei Quellen: die Match-ID des Trend-Records (der Regelfall, auch fuer
+    Live-Dateien, deren Record laengst auf das echte Spiel zeigt) und der
+    Datei-Stamm, sofern er selbst schon eine Match-ID ist. Ein reiner
+    Live-Report ohne Zuordnung (`live_<stempel>.html`, kein Record) hat keine -
+    er ist deshalb NICHT fixbar (es gaebe nichts, was man neu generieren
+    koennte)."""
+    for cand in (rec.get("match_id"), path.stem):
+        if cand and _REAL_MATCH_ID.match(str(cand)):
+            return str(cand)
+    return None
 
 
 def _row(path: Path, rec: dict | None, now_s: float, has_key: bool) -> dict:
@@ -469,6 +541,18 @@ def _row(path: Path, rec: dict | None, now_s: float, has_key: bool) -> dict:
     # steht bewusst nicht in _RETRYABLE), der fehlende Ausgang waere also nicht
     # nachladbar.
     ok_without_outcome = (status == "ok" and rec.get("win") is None)
+    # Remake: kein Win/Loss, sondern ein neutraler Chip - und damit dieselbe
+    # Mechanik wie ein Spiel mit unbekanntem Ausgang (faellt aus der Quote).
+    # `ok_without_outcome` liest bewusst weiter den ROHEN Record-Wert: ein
+    # Remake ist vollstaendig ausgewertet und braucht keinen Retry-Button.
+    remake = bool(rec.get("remake"))
+    # Report-Generator-Stand des Reports. Fehlt das Feld (Report von vor der
+    # Versionierung) oder ist es aelter als der aktuelle Stand, ist der Report
+    # veraltet -> die Seite bietet den Fix-Button an, sofern die echte Match-ID
+    # bekannt ist (nur damit laesst sich neu generieren) und ein Key da ist.
+    version = rec.get("report_version")
+    version = version if isinstance(version, int) else None
+    outdated = version is None or version < REPORT_VERSION
     state = retry_state(path.stem)
     return {
         "match_id": path.stem,
@@ -477,28 +561,186 @@ def _row(path: Path, rec: dict | None, now_s: float, has_key: bool) -> dict:
         "champ": rec.get("champ"),
         "role": rec.get("role"),
         "queue": rec.get("queue"),
-        "win": rec.get("win"),
+        "win": None if remake else rec.get("win"),
+        "remake": remake,
         "status": status,
         "retryable": bool(has_key and (status in _RETRYABLE or stale_pending
                                        or ok_without_outcome)),
         "retry_running": state == "running",
         "retry_error": (state.split(":", 1)[1] if state
                         and state.startswith("failed:") else None),
+        # Versionierung: `report_version` ist der Stand DIESES Reports (None =
+        # unbekannt), `outdated` das Urteil dagegen, `fixable` ob sich daraus
+        # ein Fix-Lauf starten laesst.
+        "report_version": version,
+        "outdated": outdated,
+        "fixable": bool(has_key and outdated
+                        and _fix_match_id(path, rec) is not None),
         # Wird von `_mark_duplicates` gesetzt, wenn eine ANDERE Zeile dasselbe
         # Spiel besser abdeckt (dann ist diese hier retrybar -> Merge).
         "duplicate_of": None,
     }
 
 
+# ----------------------------------------------------------------------------
+# 3c. Spieler-Filter: "in welchen Spielen war <Riot-ID> dabei?"
+# ----------------------------------------------------------------------------
+# WARUM (Nutzer-Wunsch 2026-08-08): Die History soll sich auf EINEN Mitspieler
+# einschraenken lassen - nicht nur auf den eigenen Account. Die Namensquelle ist
+# gestaffelt, weil Alt-Reports die Spielerliste noch nicht kennen: der Record
+# mit `players` ist die vollstaendige und exakte Quelle (mit Tagline), der
+# me-Name deckt wenigstens die eigene Identitaet ab, und die gerenderte HTML
+# traegt die uebrigen neun - allerdings ohne Tagline (s. `_sniff_roster`).
+#
+# Ein Filter-Treffer allein reicht aber nicht: die Zeile muss danach auch die
+# Sicht DIESES Spielers zeigen (Champion/Rolle/Ausgang, s. `_reproject_row`).
+
+def _split_ident(ident) -> tuple[str, str | None]:
+    """Riot-ID in (Name, Tag) zerlegen, beides kleingeschrieben.
+
+    Tag ist None, wenn die Eingabe gar kein '#' hat - genau das unterscheidet
+    "nur der Namensteil zaehlt" von "Name UND Tagline muessen passen"."""
+    name, sep, tag = str(ident or "").strip().partition("#")
+    return name.strip().lower(), (tag.strip().lower() if sep else None)
+
+
+def _player_in_game(rec: dict | None, path: Path, player: str) -> bool:
+    """Hat `player` in diesem Spiel mitgespielt? (case-insensitiv)
+
+    Eingabe mit '#' vergleicht die volle Riot-ID, ohne '#' nur den Namensteil.
+    Quellen in dieser Reihenfolge, der erste Treffer gewinnt: die Spielerliste
+    des Records (vollstaendig -> ein Nicht-Treffer ist ein echtes Nein), sonst
+    der me-Name des Records und danach die Namen aus der Report-HTML. Die HTML
+    kennt keine Taglines, dort entscheidet immer nur der Namensteil.
+
+    Ohne jede Namensquelle -> False: bei aktivem Filter faellt die Zeile lieber
+    raus, als eine fremde Partie unterzuschieben."""
+    want_name, want_tag = _split_ident(player)
+    if not want_name:
+        return True
+    rec = rec or {}
+
+    def _full_hit(cand) -> bool:
+        name, tag = _split_ident(cand)
+        return name == want_name and (want_tag is None or tag == want_tag)
+
+    known = [n for n in (rec.get("players") or []) if n]
+    if known:
+        return any(_full_hit(n) for n in known)
+    if rec.get("name") and _full_hit(rec["name"]):
+        return True
+    return any(_split_ident(n)[0] == want_name for n in _sniff_roster(path)[2])
+
+
+def _find_participant(cands, want_name: str, want_tag: str | None) -> dict | None:
+    """Ersten Teilnehmer mit passendem Namen aus einer `participants`-Liste.
+
+    Vergleichs-Semantik wie im Filter selbst (`_player_in_game`): mit Tagline nur
+    bei voller Riot-ID, sonst zaehlt der Namensteil."""
+    for cand in cands or []:
+        if not isinstance(cand, dict):
+            continue
+        name, tag = _split_ident(cand.get("name"))
+        if name and name == want_name and (want_tag is None or tag == want_tag):
+            return cand
+    return None
+
+
+def _reproject_row(row: dict, rec: dict | None, path: Path,
+                   player: str) -> None:
+    """Champion/Rolle/Ergebnis der Zeile auf den GEFILTERTEN Spieler umstellen
+    (in place).
+
+    WARUM (Bugfix 2026-08-08): Die Zeile kommt aus der me-Perspektive des
+    Reports. Filtert der Nutzer auf einen Mitspieler oder Gegner, stand dort
+    weiter DER EIGENE Champion samt eigenem Ergebnis - und die Quote oben zaehlte
+    die eigenen Siege statt die des gefilterten Spielers.
+
+    Quelle ist der Record (`participants`), fuer Alt-Records ohne das Feld die
+    Zuordnung aus der gerenderten HTML (dort ohne Tagline, s. `_sniff_roster`).
+    Der me-Spieler selbst braucht keinen Sonderfall: seine Werte sind in beiden
+    Quellen dieselben wie im Record.
+
+    Der Ausgang gilt fuer die eigene Seite unveraendert und fuer die Gegenseite
+    gespiegelt; `None` (unbekannter Ausgang, Remake) hat kein Gegenteil und
+    bleibt None. Ohne jede Zuordnung wird die Zeile ehrlich leer
+    (champ/role/win = None) statt falsch - sie faellt damit auch aus der Quote."""
+    want_name, want_tag = _split_ident(player)
+    if not want_name:
+        return
+    hit = _find_participant((rec or {}).get("participants"), want_name, want_tag)
+    if hit is None:
+        # Die HTML kennt keine Taglines - dort entscheidet nur der Namensteil.
+        hit = _find_participant(_sniff_roster(path)[3], want_name, None)
+    if hit is None:
+        row["champ"] = None
+        row["role"] = None
+        row["win"] = None
+        return
+    row["champ"] = hit.get("champ")
+    row["role"] = hit.get("role")
+    ally = hit.get("ally")
+    if ally is None:
+        # Seite unbekannt (kein me-Spieler/Team im Report) -> nicht umrechenbar.
+        row["win"] = None
+    elif not ally and isinstance(row["win"], bool):
+        row["win"] = not row["win"]
+
+
+def _default_player(cfg) -> str | None:
+    """Vorbelegung des Filters fuers Frontend: die eigene Riot-ID aus `me:`.
+
+    Nur eine echte Riot-ID ('Name#Tag') taugt dafuer - `me:` darf auch eine rohe
+    PUUID sein, und die ist als Anzeige- und Vergleichswert wertlos."""
+    ident = (cfg.me or "").strip()
+    return ident if "#" in ident else None
+
+
+def _known_players(index: dict) -> list:
+    """Alle aus den Trend-Records bekannten vollen Riot-IDs (fuer die Vorschlags-
+    Liste des Frontends), case-insensitiv dedupliziert und alphabetisch.
+
+    Neben `players` zaehlt auch der me-Name mit: Alt-Records ohne Spielerliste
+    wuerden sonst gar nichts beisteuern."""
+    seen: dict[str, str] = {}
+    for rec in index.values():
+        cands = list(rec.get("players") or [])
+        cands.append(rec.get("name"))
+        for cand in cands:
+            value = str(cand or "").strip()
+            if "#" in value:
+                seen.setdefault(value.lower(), value)
+    return sorted(seen.values(), key=str.lower)
+
+
 def list_games(cfg, *, limit: int = DEFAULT_LIMIT, now_s: float | None = None,
-               log=print) -> dict:
+               log=print, player: str | None = None) -> dict:
     """Die letzten `limit` Spiele aus dem postgame-Ordner + Win/Loss-Quote.
 
     Rueckgabe::
 
         {"games": [ {match_id, url, date_ms, champ, role, win, status,
-                     retryable, retry_running, retry_error}, ... ],
-         "wins": int, "losses": int, "unknown": int, "winrate_pct": int|None}
+                     retryable, retry_running, retry_error,
+                     report_version, outdated, fixable}, ... ],
+         "wins": int, "losses": int, "unknown": int, "winrate_pct": int|None,
+         "report_version": int,
+         "player": str|None, "default_player": str|None, "players": [str, ...]}
+
+    `report_version` auf oberster Ebene ist der AKTUELLE Stand des
+    Report-Generators (einmal, nicht je Zeile); je Zeile steht daneben der
+    Stand, mit dem der jeweilige Report gebaut wurde.
+
+    `player` schraenkt die Liste auf die Spiele ein, in denen diese Riot-ID
+    MITGESPIELT hat (egal ob als "me" oder als einer der anderen neun, s.
+    `_player_in_game`); None = kein Filter. Der Filter greift NACH der
+    Duplikat-Erkennung, aber VOR Limit und Quote - eine gefilterte Ansicht
+    zeigt also ihre eigenen 20 Spiele mit ihrer eigenen Winrate. Zusaetzlich
+    wechselt die Zeile die PERSPEKTIVE: `champ`/`role`/`win` gehoeren dann dem
+    gefilterten Spieler (auf der Gegenseite also der gespiegelte Ausgang, s.
+    `_reproject_row`), ohne Filter bleibt alles die me-Sicht. `player` im
+    Ergebnis ist der angewandte Filter, `default_player` die Vorbelegung fuers
+    Frontend (`me:`) und `players` die bekannten Riot-IDs fuer dessen
+    Vorschlags-Liste.
 
     Sortiert nach Datum absteigend (Trend-Record `date_ms`, sonst Datei-mtime).
     Spiele mit unbekanntem Ausgang (`win` = null, z.B. key-freier Live-Report)
@@ -541,6 +783,20 @@ def list_games(cfg, *, limit: int = DEFAULT_LIMIT, now_s: float | None = None,
         _mark_duplicates(_sniffed_pairs(cfg, pairs), has_key)
     except Exception as exc:   # noqa: BLE001 - Erkennung ist Kuer, nie crashen
         log(f"[history] Duplikat-Erkennung uebersprungen ({exc!r}).")
+    # Spieler-Filter VOR Limit und Quote (s. Docstring): sonst zeigte eine
+    # gefilterte Ansicht nur die Reste der letzten 20 Spiele.
+    if player:
+        kept = []
+        for row, rec in pairs:
+            path = cfg.postgame_out_dir / f"{row['match_id']}.html"
+            if not _player_in_game(rec, path, player):
+                continue
+            # Perspektive umstellen, BEVOR gezaehlt wird: Champion/Rolle/Ausgang
+            # der Zeile gehoeren dem gefilterten Spieler - damit stimmt auch die
+            # Quote fuer ihn (s. `_reproject_row`).
+            _reproject_row(row, rec, path, player)
+            kept.append((row, rec))
+        pairs = kept
     rows = sorted((row for row, _rec in pairs),
                   key=lambda r: r["date_ms"], reverse=True)
     if limit and limit > 0:
@@ -555,6 +811,10 @@ def list_games(cfg, *, limit: int = DEFAULT_LIMIT, now_s: float | None = None,
         "losses": losses,
         "unknown": len(rows) - decided,
         "winrate_pct": round(wins / decided * 100) if decided else None,
+        "report_version": REPORT_VERSION,
+        "player": player or None,
+        "default_player": _default_player(cfg),
+        "players": _known_players(index),
     }
 
 
@@ -761,7 +1021,7 @@ def _rebuild_report(cfg, match_id: str, path: Path, rec: dict, log=print,
             # Record-lose Datei (ihr Record wurde von einem anderen Lauf
             # verdraengt, s. trend._drop_displaced_stamp): die Suchmerkmale
             # stehen in der HTML selbst - sonst waere diese Zeile nie heilbar.
-            roster, sniffed = _sniff_roster(path)
+            roster, sniffed, _names, _pairs = _sniff_roster(path)
             champ = champ or sniffed
             if roster:
                 log(f"[history] Kein Roster im Record - {len(roster)} Champions "
@@ -863,6 +1123,57 @@ def _retry_once(cfg, match_id: str, path: Path, rec: dict, log=print,
 
 
 # ============================================================================
+# 4a. Fix: Report mit dem AKTUELLEN Generator-Stand neu bauen
+# ============================================================================
+
+def start_fix(cfg, match_id: str, *, spawn=None, log=print) -> dict:
+    """Einen veralteten Report mit dem aktuellen Generator neu erzeugen.
+
+    Unterschied zum Retry: hier fehlen keine Daten, sondern der Report wurde mit
+    einer aelteren `postgame.REPORT_VERSION` gebaut (anderes Layout, andere
+    Sektionen). Es ist also nichts zu SUCHEN - die echte Match-ID steht schon
+    fest (Record oder Datei-Stamm, s. `_fix_match_id`), der Resolver entfaellt
+    komplett. Gebaut wird ueber denselben Weg wie der Retry
+    (`_rebuild_report` mit vorgegebener `real_id`): Match/Timeline kommen
+    Cache-first, die Fairness-Calls laufen normal, die HTML-Datei behaelt ihren
+    Namen (die History-Zeile verlinkt sie).
+
+    Rueckgabe/Registry wie beim Retry: sofort `{"started": True}` bzw.
+    `{"started": False, "reason": ...}`, der Fortschritt kommt ueber
+    `retry_running`/`retry_error` derselben Zeile."""
+    spawn = spawn or _spawn_daemon
+    # Kein Pfad-Ausbruch ueber den Namen (der Wert kommt aus der URL).
+    if not match_id or match_id != Path(match_id).name or match_id.startswith("."):
+        return {"started": False, "reason": "Ungültige Match-ID."}
+    if not cfg.active_api_keys:
+        return {"started": False,
+                "reason": "Kein API-Key konfiguriert (config.yml)."}
+    path = cfg.postgame_out_dir / f"{match_id}.html"
+    if not path.exists():
+        return {"started": False, "reason": "Report-Datei nicht gefunden."}
+    try:
+        index = _record_index(cfg)
+    except Exception as exc:   # noqa: BLE001 - Records sind optional
+        log(f"[history] Trend-Records nicht lesbar ({exc!r}).")
+        index = {}
+    rec = index.get(match_id) or {}
+    real_id = _fix_match_id(path, rec)
+    if not real_id:
+        return {"started": False,
+                "reason": "Match-ID unbekannt – dieser Report lässt sich nicht "
+                          "neu generieren."}
+    with _RETRY_LOCK:
+        if _RETRY_STATE.get(match_id) == "running":
+            return {"started": False, "reason": "Es läuft bereits ein Lauf."}
+        _RETRY_STATE[match_id] = "running"
+
+    log(f"[history] Fix fuer {match_id} (Match {real_id}) gestartet ...")
+    spawn(lambda: _retry_once(cfg, match_id, path, rec, log=log,
+                              real_id=real_id))
+    return {"started": True, "match_id": real_id}
+
+
+# ============================================================================
 # 4b. Manuelles Nachladen ueber die GameID aus dem Riot-Client
 # ============================================================================
 
@@ -926,22 +1237,110 @@ def start_load(cfg, platform: str, game_id: str, *, spawn=None,
 
 
 # ============================================================================
+# 4c. Loeschen: ein Spiel endgueltig aus der History entfernen
+# ============================================================================
+
+def _unlink_quiet(path: Path, *, log=print) -> bool:
+    """Eine Datei loeschen, ohne dass ein Fehler nach aussen dringt.
+
+    Rueckgabe: wurde sie geloescht? Eine schon fehlende Datei ist kein Fehler
+    (der Aufrufer raeumt optionale Nebendateien auf), alles andere wird geloggt
+    und als Teilerfolg hingenommen."""
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        log(f"[history] {path.name} nicht loeschbar ({exc!r}).")
+        return False
+
+
+def delete_game(cfg, match_id: str, *, log=print) -> dict:
+    """Ein Spiel endgueltig loeschen: Report-HTML(s) + Trend-Records.
+
+    Geloescht wird immer das GANZE Spiel, nicht nur die angeklickte Datei: ein
+    Doppel-Capture (zwei HTMLs, ein Match) wuerde sonst als zweite Zeile stehen
+    bleiben und die Quote weiter verfaelschen. Mitgenommen wird je geloeschter
+    Datei ihr Stamm-Record (`trend/<stem>.json`) und - bei bekannter echter
+    Match-ID - der Record `trend/<real_id>.json`; ein zurueckbleibender Record
+    wuerde das Spiel im Trend weiterzaehlen.
+
+    NICHT angetastet werden der Shard-Store (die Riot-Rohdaten sind Quota und
+    key-unabhaengig weiterverwendbar) und die Live-Dumps - geloescht wird die
+    Auswertung, nicht die Datenbasis.
+
+    Rueckgabe `{"deleted": True, "files": <anzahl geloeschter HTMLs>}` bzw.
+    `{"deleted": False, "reason": ...}` - wie die uebrigen History-Aktionen nie
+    ein HTTP-Fehler, der Aufrufer zeigt den Grund einfach an. Teilerfolg ist
+    erlaubt: eine gesperrte Datei bleibt liegen, der Rest verschwindet
+    trotzdem (die Seite laedt danach ohnehin die Wahrheit nach)."""
+    # Kein Pfad-Ausbruch ueber den Namen (der Wert kommt aus der URL).
+    if not match_id or match_id != Path(match_id).name or match_id.startswith("."):
+        return {"deleted": False, "reason": "Ungültige Match-ID."}
+    path = cfg.postgame_out_dir / f"{match_id}.html"
+    if not path.exists():
+        return {"deleted": False, "reason": "Report-Datei nicht gefunden."}
+    # Ein laufender Retry/Fix/Load SCHREIBT diese Datei am Ende neu - geloescht
+    # waere sie also nur bis zum Ende des Workers weg.
+    if retry_state(match_id) == "running":
+        return {"deleted": False,
+                "reason": "Es läuft gerade ein Nachladen – bitte warten."}
+    try:
+        index = _record_index(cfg)
+    except Exception as exc:   # noqa: BLE001 - Records sind optional
+        log(f"[history] Trend-Records nicht lesbar ({exc!r}).")
+        index = {}
+    real_id = _fix_match_id(path, index.get(match_id) or {})
+    files = [path]
+    if real_id:
+        files.extend(_duplicate_files(cfg, real_id, path, index))
+
+    rec_dir = trend.trend_dir(cfg)
+    # Alle Stems, deren Registry-Eintrag danach nichts mehr bedeutet (ein alter
+    # "failed:"-Zustand duerfte eine gleichnamige neue Datei nicht erben).
+    stems = [match_id]
+    removed = 0
+    for f in files:
+        try:
+            f.unlink()
+        except OSError as exc:
+            log(f"[history] Report {f.name} nicht loeschbar ({exc!r}).")
+            continue
+        removed += 1
+        stems.append(f.stem)
+        _unlink_quiet(rec_dir / f"{f.stem}.json", log=log)
+    if real_id:
+        _unlink_quiet(rec_dir / f"{real_id}.json", log=log)
+        stems.append(real_id)
+    with _RETRY_LOCK:
+        for stem in stems:
+            _RETRY_STATE.pop(stem, None)
+    log(f"[history] Spiel {real_id or match_id} geloescht "
+        f"({removed} Report-Datei(en)).")
+    return {"deleted": True, "files": removed}
+
+
+# ============================================================================
 # 5. Sammel-Retry: alle unvollstaendigen Reports in EINEM Rutsch nachladen
 # ============================================================================
 
-def _retry_targets(cfg, *, limit: int = DEFAULT_LIMIT, log=print) -> list[str]:
+def _retry_targets(cfg, *, limit: int = DEFAULT_LIMIT, log=print,
+                   player: str | None = None) -> list[str]:
     """IDs aller Reports, die aktuell einen Retry vertragen.
 
     Exakt die Zeilen, die die History-Seite als retrybar zeigt (`_row`:
     Status failed/no_key/unknown, haengendes pending oder "ok" ohne bekannten
     Ausgang, Key vorhanden) - ohne die, an denen gerade schon ein Retry
-    arbeitet."""
-    games = list_games(cfg, limit=limit, log=log)["games"]
+    arbeitet. `player` schraenkt auf dieselbe Sicht ein, die der Nutzer
+    gerade sieht (None = ungefiltert)."""
+    games = list_games(cfg, limit=limit, log=log, player=player)["games"]
     return [g["match_id"] for g in games
             if g["retryable"] and not g["retry_running"]]
 
 
-def start_retry_all(cfg, *, spawn=None, sleep=time.sleep, log=print) -> dict:
+def start_retry_all(cfg, *, spawn=None, sleep=time.sleep, log=print,
+                    player: str | None = None) -> dict:
     """Alle retrybaren Reports nacheinander nachladen (asynchron).
 
     Rueckgabe sofort: `{"started": <anzahl>}` bzw. `{"started": 0, "reason":
@@ -953,6 +1352,9 @@ def start_retry_all(cfg, *, spawn=None, sleep=time.sleep, log=print) -> dict:
     `_window_ids`) plus die Matches, die der Disk-Cache (`enrich._load_match`)
     noch nicht hat - Spiele desselben Abends teilen sich diese Matches also
     ueber den Cache.
+
+    `player` reicht den Spieler-Filter der Seite durch: nachgeladen wird genau
+    das, was der Nutzer gerade sieht (None = alles).
 
     Doppel-Trigger: ein zweiter Batch wird abgelehnt, solange der erste laeuft;
     die betroffenen Spiele stehen ausserdem sofort auf "running", damit ein
@@ -973,7 +1375,7 @@ def start_retry_all(cfg, *, spawn=None, sleep=time.sleep, log=print) -> dict:
 
     # Ab hier MUSS das Flag auf jedem Pfad wieder fallen.
     try:
-        targets = _retry_targets(cfg, log=log)
+        targets = _retry_targets(cfg, log=log, player=player)
     except Exception as exc:   # noqa: BLE001 - nie crashen
         _set_batch_running(False)
         log(f"[history] Sammel-Retry nicht startbar ({exc!r}).")

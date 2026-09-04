@@ -1,6 +1,6 @@
-"""Situative Schicht: konditionale Layer (by_threat/by_state/by_partner),
-Botlane-Partner-Glue, Behind-Situationals (V2-08), das Scoring des situativen
-Blocks und die Support-Item-Endwahl (Schicht 5).
+"""Situative Schicht: konditionale Layer (by_threat/by_state/by_partner/by_heal/
+by_keystone), Botlane-Partner-Glue, Behind-Situationals (V2-08), das Scoring des
+situativen Blocks und die Support-Item-Endwahl (Schicht 5).
 
 Aus recommend.py ausgelagert (Modul-Split, T4/T6).
 """
@@ -14,6 +14,10 @@ from .rec_explain import (_bucket_label, _is_defensive, _is_defensive_item,
                           explain_item, tag_fields)
 from .rec_next_after import _next_after_lift, _next_after_reason
 from .rec_path import _learned_conflict, _slot_support
+from .rec_style import (
+    class_overlay_active, overlay_entries, style_axis, style_factor,
+    style_reason_suffix,
+)
 from .rec_weights import RANK_MIN_N
 
 
@@ -63,8 +67,26 @@ def _conditional_layers(ctx: _RecContext) -> None:
     ctx.partner_items = {t["item"]: t for t in bp_data["items"]} if bp_data else {}
     ctx.partner_base = bp_data.get("base_win_rate") if bp_data else None
 
-    # Konfidenz-Gate pro KOMBI: unterhalb von CONF_RICH_MIN sind die
-    # konditionalen Schichten (by_threat/by_state/by_partner) zu duenn - gar
+    # Heal-konditioniert (by_heal): der Bucket steht schon aus _build_context
+    # (None, solange die Schicht per heal_factor aus ist). Die Zelle kommt ueber
+    # den knowledge-Accessor, damit KBs ohne das Feld sauber leer liefern statt
+    # hier einen zweiten Alt-Schema-Guard zu brauchen.
+    hl_data = (knowledge.heal_cells(ctx.cid, ctx.used_role).get(ctx.heal_bucket)
+               if ctx.heal_bucket else None)
+    ctx.heal_items = {t["item"]: t for t in hl_data["items"]} if hl_data else {}
+    ctx.heal_base = hl_data.get("base_win_rate") if hl_data else None
+
+    # Keystone-konditioniert (by_keystone): die eigene Hauptrune steht schon aus
+    # _build_context (None, solange die Schicht per keystone_factor aus ist).
+    # Nachgeschlagen wird mit str(Perk-ID) - so exportiert die Pipeline die
+    # Zellen-Schluessel (YAML kennt nur String-Keys).
+    ks_data = (knowledge.keystone_cells(ctx.cid, ctx.used_role)
+               .get(str(ctx.keystone_id)) if ctx.keystone_id else None)
+    ctx.keystone_items = {t["item"]: t for t in ks_data["items"]} if ks_data else {}
+    ctx.keystone_base = ks_data.get("base_win_rate") if ks_data else None
+
+    # Konfidenz-Gate pro KOMBI: unterhalb von CONF_RICH_MIN sind die konditionalen
+    # Schichten (by_threat/by_state/by_partner/by_heal/by_keystone) zu duenn - gar
     # nicht erst anwenden (kein Score-Schub, kein "Win gegen"-Text), statt still
     # zu verrauschen. Der Core-Pfad, Stance und Archetyp-Wahl bleiben unberuehrt.
     if ctx.confidence != "rich":
@@ -72,22 +94,41 @@ def _conditional_layers(ctx: _RecContext) -> None:
         ctx.threat_base = ctx.state_base = None
         ctx.partner_items = {}
         ctx.partner_base = None
+        ctx.heal_items = {}
+        ctx.heal_base = None
+        ctx.keystone_items = {}
+        ctx.keystone_base = None
 
     # Klassen-Fallback (Review Befund 4.3): bei nicht-`rich` Kombis die situativen
     # Kandidaten um Items aus dem Klassen-Aggregat ERGAENZEN (z.B. AD-Fighter
     # JUNGLE statt 80 Yorick-Spielen). Die eigenen Champion-Kandidaten bleiben
     # unveraendert und ranken IMMER vor den Klassen-Kandidaten (rein additiv),
-    # damit Champion-Evidenz Vorrang behaelt. Bei `rich` bleibt alles wie bisher.
+    # damit Champion-Evidenz Vorrang behaelt. Bei `rich` greift dieser Fallback
+    # weiterhin nicht - dort gibt es nur die eine, unten beschriebene Ausnahme.
     ctx.lookup_role = ctx.used_role or ctx.role or ""
-    if ctx.confidence != "rich":
+    # Spielstil-Klassen-Overlay (plan_spielstil.md F3): auf Stufe 1 wird der
+    # Klassen-Pool AUCH fuer `rich` geladen - der umgekehrte Fall zum Fallback
+    # oben. Die Kombi hat reichlich eigene Daten, das gesuchte Item steht darin
+    # nur nicht (Gwen JUNGLE kennt Liandry's nicht, ap_fighter JUNGLE schon).
+    # Bewusst OHNE `class_boots`: die Boots-Seite des Reglers laeuft ueber ihren
+    # eigenen Prior (rec_boots), ein zweiter Boots-Pfad waere Doppelarbeit.
+    ctx.style_overlay = class_overlay_active(ctx.weights, ctx.confidence)
+    if ctx.confidence != "rich" or ctx.style_overlay:
         ctx.class_bucket = champions.bucket_for_id(ctx.cid)
         if ctx.class_bucket:
             class_entry = knowledge.for_class(ctx.class_bucket, ctx.lookup_role)
             if class_entry:
                 ctx.class_situational = [e for e in class_entry.get("situational", [])
                                          if items.is_valid_sr(e["item"])]
-                ctx.class_boots = [e for e in class_entry.get("boots", [])
-                                   if items.is_valid_sr(e["item"])]
+                if ctx.style_overlay:
+                    # Nur "sinnvolle" Kandidaten: Achse <= 0 (kein weiteres
+                    # reines Schadens-Item auf "hard defensive") und passende
+                    # Ressource (kein Mana-Item fuer einen Fury-Champion).
+                    ctx.class_situational = overlay_entries(
+                        ctx.class_situational, ctx.cid)
+                else:
+                    ctx.class_boots = [e for e in class_entry.get("boots", [])
+                                       if items.is_valid_sr(e["item"])]
                 ctx.class_games = class_entry.get("games", 0)
     ctx.class_label = _bucket_label(ctx.class_bucket)
     # Namen, die der Champion-Pool bereits kennt -> Klassen-Duplikate auslassen.
@@ -177,11 +218,17 @@ DEF_SLOT_MIN_N = 10
 
 
 def _defensive_layer_active(ctx: _RecContext) -> bool:
-    """Feuert die Slot-Reservierung? Defensive Stance ODER scharfes Todes-Signal
-    - und nur, solange der Schalter `defensive_slot` an ist (Ablation)."""
+    """Feuert die Slot-Reservierung? Defensive Stance, scharfes Todes-Signal
+    ODER ein defensiver Spielstil-Regler (plan_spielstil.md F1c) - und nur,
+    solange der Schalter `defensive_slot` an ist (Ablation).
+
+    Der Regler-Zweig ist kein Lage-Signal, sondern eine Ansage: wer Stufe 1-2
+    waehlt, will die defensive Option auch dann sehen, wenn das Spiel gerade
+    ruhig laeuft. Bei Tilt 0 aendert er nichts."""
     if not ctx.weights.defensive_slot:
         return False
-    return ctx.stance == "defensive" or bool(ctx.death_signal)
+    return (ctx.stance == "defensive" or bool(ctx.death_signal)
+            or ctx.weights.style_tilt < 0)
 
 
 def _def_want(ctx: _RecContext) -> str | None:
@@ -424,8 +471,17 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
         # >= 0, damit ist die Richtung des Lifts eindeutig. Ausgeschlossene
         # Kandidaten (owned/conflicts) sind oben bereits raus - sie bekommen
         # nie einen Lift.
+        # Spielstil-Regler (plan_spielstil.md): derselbe Angriffspunkt und
+        # dieselbe Begruendung wie beim Lift - Basisterm, nicht Endscore.
+        style_mult = style_factor(weights.style_tilt, style_axis(name), weights)
         score = entry["pick_rate"] * slot_mult * _next_after_lift(
-            na_cond, na_marginal, na_owned, name, weights.next_after_factor)
+            na_cond, na_marginal, na_owned, name,
+            weights.next_after_factor) * style_mult
+        if source == "class" and ctx.style_overlay:
+            # Klassen-Overlay (F3): der Kandidat darf in den Pool, tritt aber
+            # gedaempft gegen die Champion-Evidenz an - "Champion vor Klasse"
+            # gilt weiter, nur ueber den Faktor statt ueber den Ausschluss.
+            score *= weights.style_class_factor
         # Win-Rates nie ohne n: wo die KB die Fallzahl mitliefert, ausweisen.
         n_txt = f", n={entry['count']}" if entry.get("count") is not None else ""
         stats = (f"{entry['pick_rate']:.0%} Pick, {entry['win_rate']:.0%} Win"
@@ -449,6 +505,10 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
                 # das Item hier weiter oben steht.
                 extra += (f" - folgt in {share:.0%} der Spiele direkt auf dein "
                           f"{prev}, {ratio:.1f}x so oft wie sonst (n={n_na})")
+        # Spielstil-Zusatz nur, wo der Regler diese Karte wirklich bewegt hat
+        # (Faktor != 1) - auf einem HP-Hybrid mit Achse 0 waere er eine
+        # Behauptung ohne Wirkung.
+        extra += style_reason_suffix(weights.style_tilt, style_mult)
         if name in threat_items:
             t = threat_items[name]
             n = t.get("count")
@@ -507,6 +567,53 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
                 extra += (f" - {t['win_rate']:.0%} Win mit "
                           f"{plabel}-Partner (n={n})")
             # n < RANK_MIN_N: Signal stumm.
+        # Heal-konditioniert (by_heal): NUR bei >= 2 Heilern im Gegnerteam +
+        # rich + aktiver Schicht (heal_factor > 0; bei 0 ist ctx.heal_items leer,
+        # weil schon der Bucket nicht gebildet wurde). Mechanik exakt wie
+        # by_threat: Shrinkage + RANK_MIN_N-Zellgate + Cap/Faktor.
+        if name in ctx.heal_items:
+            t = ctx.heal_items[name]
+            n = t.get("count")
+            if n is None or ctx.heal_base is None:
+                # Kuratiert (Override/alte Zelle ohne count/base): kein Gate,
+                # keine Shrinkage - Roh-Win-Rate gegen 0.5.
+                score += max(-weights.heal_cap, min(
+                    weights.heal_cap, weights.heal_factor * (t["win_rate"] - 0.5)))
+                extra += (f" - {t['win_rate']:.0%} Win gegen Heal-lastige Teams "
+                          "(2+ Heiler)")
+            elif n >= RANK_MIN_N:
+                wr = _shrunk(t["win_rate"], n, ctx.heal_base)
+                score += max(-weights.heal_cap, min(
+                    weights.heal_cap, weights.heal_factor * (wr - ctx.heal_base)))
+                extra += (f" - {t['win_rate']:.0%} Win gegen Heal-lastige Teams "
+                          f"(2+ Heiler, n={n})")
+            # n < RANK_MIN_N: Signal stumm.
+        # Keystone-konditioniert (by_keystone): NUR bei bekannter eigener
+        # Hauptrune + rich + aktiver Schicht (keystone_factor > 0; bei 0 ist
+        # ctx.keystone_items leer, weil die Rune gar nicht in den Kontext kam).
+        # Mechanik exakt wie by_threat: Shrinkage + RANK_MIN_N-Zellgate + Cap.
+        if name in ctx.keystone_items:
+            t = ctx.keystone_items[name]
+            n = t.get("count")
+            # Anzeigename der Rune nur, wenn eine Quelle ihn mitgeliefert hat
+            # (Live-API `displayName`) - es gibt bewusst keinen Runen-Static, aus
+            # dem er nachgeschlagen wuerde. Sonst neutral: die Perk-ID im Text
+            # waere fuer den Spieler wertlos.
+            rune = ctx.keystone_name or "deiner Hauptrune"
+            if n is None or ctx.keystone_base is None:
+                # Kuratiert (Override/alte Zelle ohne count/base): kein Gate,
+                # keine Shrinkage - Roh-Win-Rate gegen 0.5.
+                score += max(-weights.keystone_cap, min(
+                    weights.keystone_cap,
+                    weights.keystone_factor * (t["win_rate"] - 0.5)))
+                extra += f" - {t['win_rate']:.0%} Win mit {rune}"
+            elif n >= RANK_MIN_N:
+                wr = _shrunk(t["win_rate"], n, ctx.keystone_base)
+                score += max(-weights.keystone_cap, min(
+                    weights.keystone_cap,
+                    weights.keystone_factor * (wr - ctx.keystone_base)))
+                extra += f" - {t['win_rate']:.0%} Win mit {rune} (n={n})"
+            # n < RANK_MIN_N: Signal stumm.
         vs = "ad" if split["ad"] >= split["ap"] else "ap"
         defensive = _is_defensive(name, vs)
         # Die Stance verschiebt hier NICHTS mehr am Score (Befund D, Pfad beim
@@ -535,10 +642,24 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
             # Klar als Klassen-Fallback labeln (source + Reason-Zusatz), damit der
             # Nutzer Champion-Evidenz von Klassen-Daten unterscheiden kann.
             rec["source"] = "class"
-            rec["reason"] = (why.rstrip(".") +
-                             f" - aus Klassen-Daten ({class_label} {lookup_role}, "
-                             f"n={class_games}).")
-            class_scored.append([score, rec])
+            herkunft = (f" - aus Klassen-Daten ({class_label} {lookup_role}, "
+                        f"n={class_games})")
+            if ctx.style_overlay:
+                # Overlay-Fall (F3): die Kombi hat reichlich EIGENE Daten,
+                # dieses Item steht darin nur nicht - eine andere Aussage als
+                # der Fallback "zu wenige Spiele fuer eigene Statistik", und der
+                # Text muss sie unterscheiden. Dafuer ist der Kandidat ein
+                # REGULAERER Pool-Eintrag: er darf `next` werden, bekommt
+                # `now_rel` und sortiert in die Pool-Gruppe.
+                rec["style_overlay"] = True
+                herkunft += (f" - in den eigenen Spielen von {ctx.champion} "
+                             f"zu selten fuer eine eigene Statistik")
+                rec["reason"] = why.rstrip(".") + herkunft + "."
+                scored.append([score, rec])
+                path_scores[name] = score
+            else:
+                rec["reason"] = why.rstrip(".") + herkunft + "."
+                class_scored.append([score, rec])
         else:
             scored.append([score, rec])
             # Nur Champion-Evidenz kommt in den Pool: Klassen-Kandidaten ranken

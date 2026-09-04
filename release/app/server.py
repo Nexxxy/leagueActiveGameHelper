@@ -1,5 +1,6 @@
 """FastAPI-Server: liefert den aufbereiteten Spielzustand ans Frontend,
-schreibt currentGameInfo.yaml und nimmt Prio-/Rollen-Overrides entgegen.
+schreibt currentGameInfo.yaml und nimmt die Nutzer-Vorgaben entgegen
+(Gegner-Prio, Rollen-Override, Spielstil-Regler).
 
 Start:
   python -m app.server            (echtes Spiel via Live Client Data API)
@@ -10,16 +11,17 @@ import argparse
 import json
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 
 import yaml
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.config import ROOT, VALID_ROLES, Config
 from engine import (items, knowledge, manifest, profiling, rec_deaths,
-                    rec_partner, recommend)
+                    rec_partner, rec_weights, recommend)
 from . import assets, demo, history, live_client
 
 app = FastAPI(title="League Active Game Helper")
@@ -42,6 +44,10 @@ STATE = {
     "identity": {},            # riotId -> {champion_id, name} (Befund B, pro Spiel fix)
     "last_gametime": None,     # letzte gesehene gameTime (Identitaets-Reset)
     "fed_state": {},           # riotId -> {"strong": bool, "weak": bool} (Befund C, Hysterese)
+    # Spielstil-Regler (plan_spielstil.md): Stufe 1..5, 3 = neutral. Bewusste
+    # NUTZER-Vorgabe pro Spiel, keine Lage-Erkennung - deshalb OHNE Persistenz:
+    # Serverstart und jedes neue Spiel starten wieder bei der Default-Stufe.
+    "playstyle": rec_weights.PLAYSTYLE_DEFAULT,
 }
 
 # Serialisiert Zugriffe auf _build_state (Frontend-Handler + Hintergrund-Poller).
@@ -118,6 +124,36 @@ def _role_from_kb(champion: str) -> str:
     if not champion:
         return ""
     return knowledge.for_champion(champion)[0] or ""
+
+
+def _own_keystone(player: dict) -> tuple[int | None, str | None]:
+    """(Perk-ID, Anzeigename) der Hauptrune eines Spielers aus der Live-API.
+
+    Quelle ist `allPlayers[].runes.keystone` - ein Objekt mit `id` und
+    `displayName`. Die Perk-ID ist derselbe Schluesselraum, in dem die
+    Pipeline ihre `by_keystone`-Zellen fuehrt (Match-V5-Perks), der
+    Anzeigename ist die EINZIGE Quelle fuer einen lesbaren Runen-Namen - es
+    gibt bewusst keinen Runen-Static in diesem Projekt.
+
+    Bewusst strikt defensiv (reine .get-Kette mit Typpruefung): fuer dieses
+    Feld existiert KEIN lokaler Live-Dump, an dem die Feldform verifiziert
+    werden konnte. Fehlt oder taugt ein Glied nicht, ist das Ergebnis
+    (None, None) - dann bleibt die by_keystone-Schicht stumm, genau wie bei
+    alten Dumps und im Demo-Modus (die tragen das Feld nicht)."""
+    runes = player.get("runes")
+    if not isinstance(runes, dict):
+        return None, None
+    keystone = runes.get("keystone")
+    if not isinstance(keystone, dict):
+        return None, None
+    perk_id = keystone.get("id")
+    if not isinstance(perk_id, int) or perk_id <= 0:
+        # Ohne brauchbare Perk-ID gibt es auch keinen Namen zurueck: die ID ist
+        # der Zellen-Schluessel, ein Name allein taugt fuer nichts.
+        return None, None
+    name = keystone.get("displayName")
+    return perk_id, (name.strip() if isinstance(name, str) and name.strip()
+                     else None)
 
 
 def _rid(player: dict) -> str:
@@ -233,6 +269,14 @@ def _dump_live_snapshot(raw: dict, computed: dict) -> None:
                    encoding="utf-8")
 
 
+def _playstyle_view() -> dict:
+    """Aktueller Reglerstand fuer Frontend/YAML: Stufe UND daraus abgeleiteter
+    Tilt. Der Tilt steht bewusst mit dabei, damit im YAML-Mitschrieb ohne
+    Nachschlagen steht, mit welchem Gewicht gerechnet wurde."""
+    level = STATE["playstyle"]
+    return {"level": level, "tilt": rec_weights.tilt_for_level(level)}
+
+
 def _build_state() -> dict:
     fetch = demo.fetch_allgamedata if STATE["demo"] else live_client.fetch_allgamedata
     data = fetch()
@@ -246,6 +290,11 @@ def _build_state() -> dict:
         STATE["identity"] = {}
         STATE["last_gametime"] = None
         STATE["fed_state"] = {}
+        # Spiel vorbei: Spielstil-Regler auf die neutrale Default-Stufe zurueck.
+        # Der Regler beschreibt die Rolle, die der Spieler IN DIESEM Spiel
+        # einnehmen will - ins naechste Spiel darf diese Vorgabe nicht
+        # unbemerkt mitwandern.
+        STATE["playstyle"] = rec_weights.PLAYSTYLE_DEFAULT
         # Spiel vorbei: letzten Stand als post_game weiter anzeigen, bis das
         # naechste Spiel laedt (dann antwortet die Live-API wieder mit Daten).
         last = STATE["last_game"]
@@ -266,6 +315,9 @@ def _build_state() -> dict:
     if last_gt is not None and game_time < last_gt - 30:
         STATE["identity"] = {}
         STATE["fed_state"] = {}
+        # Zweiter Neues-Spiel-Zweig (der Server lief durch, ohne je ein
+        # spielfreies Fenster zu sehen): Regler ebenfalls auf Default.
+        STATE["playstyle"] = rec_weights.PLAYSTYLE_DEFAULT
     STATE["last_gametime"] = game_time
 
     active_name = (data.get("activePlayer", {}).get("riotIdGameName")
@@ -293,7 +345,7 @@ def _build_state() -> dict:
                            or _role_from_kb(pin["name"]))
         _apply_fed_hysteresis(profile, _rid(player), STATE["fed_state"], game_time)
         enemies.append(profile)
-    profiling.add_threat_scores(enemies, STATE["priorities"])
+    profiling.add_threat_scores(enemies, STATE["priorities"], game_time)
     # Anzeige-Ranking nach display_score (Prio-gewichtet, Fix 5.2) - die manuelle
     # Priority hebt eine Karte nach oben, ohne die Stance zu beeinflussen.
     enemies.sort(key=lambda p: p["display_score"], reverse=True)
@@ -345,6 +397,16 @@ def _build_state() -> dict:
     killers = {(p.get("riotIdGameName") or p.get("summonerName")): pin
                for p, pin in resolved}
     death_signal = rec_deaths.signal_from_state(data, active_name, killers)
+    # Eigene Hauptrune (by_keystone): steht in `allPlayers[].runes.keystone` und
+    # kommt damit aus demselben `allgamedata`-Poll wie alles andere - kein
+    # zusaetzlicher Request. Fehlt das Feld (alte Dumps, Demo), bleibt beides
+    # None und die Schicht ist stumm.
+    my_keystone_id, my_keystone_name = _own_keystone(me)
+    # Spielstil-Regler: die Stufe wird HIER auf das Weights-Feld abgebildet, die
+    # Engine kennt nur den kontinuierlichen Tilt. Stufe 3 -> 0.0 -> exakt
+    # DEFAULT_WEIGHTS, das Verhalten ohne Regler bleibt also unberuehrt.
+    weights = replace(recommend.DEFAULT_WEIGHTS,
+                      style_tilt=rec_weights.tilt_for_level(STATE["playstyle"]))
     reco = recommend.recommend(
         my_pin["name"], role_hint, owned,
         my_profile["scores"], enemies,
@@ -357,6 +419,9 @@ def _build_state() -> dict:
         ally_gold_spent=ally_gold_spent,
         bot_partner=bot_partner,
         death_signal=death_signal,
+        my_keystone_id=my_keystone_id,
+        my_keystone_name=my_keystone_name,
+        weights=weights,
     )
     _add_item_ids(reco)
 
@@ -373,6 +438,10 @@ def _build_state() -> dict:
         "player": {**my_profile, "role": role_hint or reco["role"]},
         "enemies": enemies,
         "recommendations": reco,
+        # Reglerstand mit im Zustand: das Frontend stellt den Schieber danach,
+        # und der YAML-Mitschrieb haelt fest, unter welcher Vorgabe die
+        # Empfehlung entstanden ist.
+        "playstyle": _playstyle_view(),
     }
     # Partner-Klasse fuer Frontend/YAML sichtbar machen - nur wenn ueberhaupt
     # klassifiziert wurde (UTILITY + Bot-Partner erkannt). Feld-Abwesenheit ist
@@ -406,9 +475,14 @@ def get_state():
             cached = _build_state()
         STATE["cache"] = (time.monotonic(), cached)
     # refresh_seconds steuert das Auto-Reload-Intervall des Frontends (config.yml)
+    # `playstyle` bewusst UNGECACHT dazu (wie refresh_seconds): der Wert steht
+    # zwar auch im gecachten in_game-Zustand, aber (a) ausserhalb des Spiels gibt
+    # es den gar nicht, und (b) nach einem POST soll der Schieber sofort auf dem
+    # neuen Stand stehen, nicht erst nach dem naechsten Neuberechnen.
     return {**cached, "refresh_seconds": CFG.refresh_seconds,
             "assets_available": assets.assets_available(),
-            "postgame_report": _postgame_report()}
+            "postgame_report": _postgame_report(),
+            "playstyle": _playstyle_view()}
 
 
 def _postgame_report():
@@ -443,6 +517,25 @@ def set_role(update: RoleUpdate):
     STATE["role_override"] = update.role
     STATE["cache"] = (0.0, None)
     return {"ok": True}
+
+
+class PlaystyleUpdate(BaseModel):
+    # 1 = hard defensive/tanky ... 3 = neutral ... 5 = "I can carry".
+    # Die Grenzen stehen als Pydantic-Constraint und nicht als eigene Pruefung im
+    # Handler: eine kaputte Stufe soll gar nicht erst im STATE landen (FastAPI
+    # antwortet dann mit 422), statt still auf "neutral" zu degradieren - ein
+    # stiller Fallback wuerde einen Frontend-Fehler unsichtbar machen.
+    level: int = Field(..., ge=1, le=5)
+
+
+@app.post("/api/playstyle")
+def set_playstyle(update: PlaystyleUpdate):
+    """Spielstil-Regler setzen (plan_spielstil.md). Cache-Invalidierung wie bei
+    /api/role: der naechste /api/state rechnet mit dem neuen Tilt, statt bis zu
+    2 s die alte Empfehlung zu zeigen."""
+    STATE["playstyle"] = update.level
+    STATE["cache"] = (0.0, None)
+    return {"ok": True, **_playstyle_view()}
 
 
 @app.get("/api/item/{item_id}")
@@ -481,19 +574,33 @@ def get_item(item_id: int):
     }
 
 
+def _history_player(player: str | None) -> str | None:
+    """Query-Wert -> Spieler-Filter fuer app/history.py.
+
+    Der Default (eigener Account) wird bewusst NICHT hier angewandt: fehlt der
+    Parameter, filtert der Server nicht. Das Frontend kennt die Vorbelegung aus
+    `default_player` und schickt sie mit; `ALL` ist ihr expliziter Gegenwert."""
+    value = (player or "").strip()
+    return None if not value or value.upper() == "ALL" else value
+
+
 @app.get("/api/history")
-def get_history():
+def get_history(player: str | None = None):
     """Die letzten Post-Game-Reports fuer die Match-History-Seite.
 
-    Liefert {games, wins, losses, unknown, winrate_pct} (s. app/history.py).
-    Jeder Fehler wird zu einer leeren, aber wohlgeformten Antwort - die Seite
-    zeigt dann ihren Leer-Hinweis, statt einen 500 zu bekommen."""
+    Liefert {games, wins, losses, unknown, winrate_pct, player, default_player,
+    players} (s. app/history.py). `?player=<Riot-ID>` schraenkt auf die Spiele
+    dieses Mitspielers ein (`ALL` bzw. kein Parameter = alles). Jeder Fehler
+    wird zu einer leeren, aber wohlgeformten Antwort - die Seite zeigt dann
+    ihren Leer-Hinweis, statt einen 500 zu bekommen."""
     try:
-        return history.list_games(CFG, log=print)
+        return history.list_games(CFG, log=print,
+                                  player=_history_player(player))
     except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
         print(f"Warnung: Match-History nicht lesbar ({exc})")
         return {"games": [], "wins": 0, "losses": 0, "unknown": 0,
-                "winrate_pct": None, "error": str(exc)}
+                "winrate_pct": None, "player": None, "default_player": None,
+                "players": [], "error": str(exc)}
 
 
 @app.post("/api/history/{match_id}/retry")
@@ -508,6 +615,35 @@ def post_history_retry(match_id: str):
     except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
         print(f"Warnung: Retry {match_id} nicht startbar ({exc})")
         return {"started": False, "reason": str(exc)}
+
+
+@app.post("/api/history/{match_id}/fix")
+def post_history_fix(match_id: str):
+    """Einen veralteten Report mit dem aktuellen Generator neu erzeugen.
+
+    Gleiche Form wie der Retry ({"started": true} bzw. {"started": false,
+    "reason": ...}); die Arbeit laeuft in einem Daemon-Thread, der Fortschritt
+    kommt ueber `retry_running`/`retry_error` in /api/history zurueck."""
+    try:
+        return history.start_fix(CFG, match_id, log=print)
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Fix {match_id} nicht startbar ({exc})")
+        return {"started": False, "reason": str(exc)}
+
+
+@app.post("/api/history/{match_id}/delete")
+def post_history_delete(match_id: str):
+    """Einen Report endgueltig loeschen (HTML + Duplikate + Trend-Records).
+
+    Antwortet sofort ({"deleted": true, "files": <anzahl>} bzw. {"deleted":
+    false, "reason": ...}) - ohne Rueckfrage, die Seite entfernt die Zeile
+    direkt und laedt danach die Liste neu. Die Riot-Rohdaten im Shard-Store
+    bleiben liegen (s. app/history.py)."""
+    try:
+        return history.delete_game(CFG, match_id, log=print)
+    except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
+        print(f"Warnung: Report {match_id} nicht loeschbar ({exc})")
+        return {"deleted": False, "reason": str(exc)}
 
 
 class HistoryLoad(BaseModel):
@@ -544,14 +680,18 @@ def get_history_load_state(match_id: str):
 
 
 @app.post("/api/history/retry-all")
-def post_history_retry_all():
+def post_history_retry_all(player: str | None = None):
     """Alle unvollstaendigen Reports in einem Rutsch nachladen lassen.
+
+    `?player=<Riot-ID>` (gleiche Uebersetzung wie bei GET /api/history) begrenzt
+    den Lauf auf die gerade sichtbare, gefilterte Ansicht.
 
     Antwortet sofort ({"started": <anzahl>} bzw. {"started": 0, "reason": ...});
     ein einzelner Thread arbeitet die Spiele sequenziell ab, der Fortschritt
     kommt je Zeile ueber `retry_running` in /api/history zurueck."""
     try:
-        return history.start_retry_all(CFG, log=print)
+        return history.start_retry_all(CFG, log=print,
+                                       player=_history_player(player))
     except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
         print(f"Warnung: Sammel-Retry nicht startbar ({exc})")
         return {"started": 0, "reason": str(exc)}

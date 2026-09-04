@@ -8,6 +8,7 @@ from . import items
 from .rec_context import _RecContext, _tag_role
 from .rec_explain import explain_item, tag_fields
 from .rec_next_after import _next_after_lift
+from .rec_style import add_style_reason, style_axis, style_factor
 
 # --- Restpfad-Neubewertung (V2-05, plan_engine_v2.md Konzept 2) -------------
 # Vorher war die Core-Reihenfolge statisch (avg_slot): wer The Collector
@@ -231,11 +232,18 @@ def _core_pick_path(ctx: _RecContext, recs: list[dict]) -> None:
             # seine Slot-Daten vor dem aktuellen Slot enden.
             skipped.append(core)
             continue
-        score = (core.get("pick_rate", 0.0) * mult
-                 * _next_after_lift(ctx.na_cond, ctx.na_marginal, ctx.na_owned,
-                                    name, ctx.weights.next_after_factor)
-                 # Core-Status gibt nur noch einen Prior-Bonus, keine Vorfahrt.
-                 + ctx.weights.path_core_bonus)
+        # Spielstil-Faktor (plan_spielstil.md): der Core-Bonus steht BEWUSST
+        # innerhalb der Klammer. "Core-Status ist nur ein Prior"
+        # (arch_engine_auswahl) - und genau diesen Prior stellt der Regler in
+        # Frage; stuende er ausserhalb, koennte ein zurueckgestuftes Core-Item
+        # den Bonus ungedaempft behalten und die Verschiebung aussitzen.
+        score = ((core.get("pick_rate", 0.0) * mult
+                  * _next_after_lift(ctx.na_cond, ctx.na_marginal, ctx.na_owned,
+                                     name, ctx.weights.next_after_factor)
+                  # Core-Status gibt nur noch einen Prior-Bonus, keine Vorfahrt.
+                  + ctx.weights.path_core_bonus)
+                 * style_factor(ctx.weights.style_tilt, style_axis(name),
+                                ctx.weights))
         scores[name] = score
         if not now_ok:
             block.add(name)
@@ -253,6 +261,9 @@ def _core_pick_path(ctx: _RecContext, recs: list[dict]) -> None:
     note = _degraded_core_note(best[1], skipped)
     if note:
         rec["reason"] = rec["reason"].rstrip(".") + note + "."
+    add_style_reason(rec, ctx.weights.style_tilt,
+                     style_factor(ctx.weights.style_tilt,
+                                  style_axis(best[1]["item"]), ctx.weights))
     recs.append(rec)
 
 

@@ -143,6 +143,11 @@ if ($realPid.Count -gt 0) {
     Write-Host "Server gestartet (PID $($realPid[0]), Optionen: $options)"
     Write-Host "UI:  http://127.0.0.1:$port"
     Write-Host "Log: server.log | Stoppen: .\kill.ps1"
+    try {
+        Start-Process "http://127.0.0.1:$port" | Out-Null
+    } catch {
+        Write-Host "Browser konnte nicht automatisch geoeffnet werden: $($_.Exception.Message)"
+    }
 } else {
     Write-Host "Server-Start fehlgeschlagen - siehe server.log:"
     if (Test-Path -LiteralPath server.log) {

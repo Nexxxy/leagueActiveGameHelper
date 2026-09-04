@@ -302,7 +302,16 @@ def resolve_me_pid(cfg: Config, match: dict, me: str | None, log=print):
     `me` kann eine PUUID (kein '#') oder eine Riot-ID 'Name#Tag' sein; None ->
     cfg.me. Eine Riot-ID wird zuerst gegen die riotId-Felder der Participants
     geprueft (offline, kein API-Call); erst bei Fehlschlag ueber account-v1 zur
-    PUUID aufgeloest. Rueckgabe pid (int) oder None, wenn nicht bestimmbar."""
+    PUUID aufgeloest. Rueckgabe pid (int) oder None, wenn nicht bestimmbar.
+
+    **PUUID-Falle (key-Bindung):** Riot verschluesselt PUUIDs PRO API-KEY. Ein
+    gecachtes Match traegt die PUUIDs des Keys, der es geholt hat - eine mit einem
+    ANDEREN Key aufgeloeste PUUID trifft dort NIE (und Riot-Endpunkte quittieren
+    fremde PUUIDs mit HTTP 400). Der einzige key-unabhaengige Identitaetsweg ist
+    die Riot-ID, die im Match selbst steht (`riotIdGameName`/`riotIdTagline`, s.
+    `app/history.py:_is_me`). Ist `me` eine rohe PUUID und trifft sie keinen
+    Participant, wird sie darum ueber account-v1 (`account_by_puuid`) in eine
+    Riot-ID uebersetzt und offline verglichen."""
     ident = (me or cfg.me or "").strip()
     parts = match["info"]["participants"]
     if not ident:
@@ -310,21 +319,52 @@ def resolve_me_pid(cfg: Config, match: dict, me: str | None, log=print):
 
     if "#" in ident:
         name, _, tag = ident.partition("#")
-        name_l, tag_l = name.strip().lower(), tag.strip().lower()
-        for p in parts:
-            if (str(p.get("riotIdGameName", "")).lower() == name_l
-                    and str(p.get("riotIdTagline", "")).lower() == tag_l):
-                return p.get("participantId")
-        # Fallback: account-v1 -> PUUID -> Participant.
+        pid = _pid_by_riot_id(parts, name, tag)
+        if pid is not None:
+            return pid
+        # Fallback: account-v1 -> PUUID -> Participant. Greift nur, wenn der
+        # Offline-Namensvergleich scheiterte (z. B. Umbenennung seit dem Spiel);
+        # bei einem gecachten Match eines anderen Keys laeuft er in dieselbe
+        # PUUID-Falle und liefert dann nichts - ein Versuch bleibt er trotzdem.
         client = _build_client(cfg, match["metadata"]["matchId"])
         acc = client.account_by_riot_id(name.strip(), tag.strip())
         if acc and acc.get("puuid"):
-            return _pid_by_puuid(parts, acc["puuid"])
+            pid = _pid_by_puuid(parts, acc["puuid"])
+            if pid is not None:
+                return pid
         log(f"[postgame] Riot-ID '{ident}' nicht im Match gefunden.")
         return None
 
-    # sonst PUUID
-    return _pid_by_puuid(parts, ident)
+    # sonst PUUID: direkt vergleichen (trifft bei frisch mit DIESEM Key geholten
+    # Matches), sonst ueber account-v1 zur Riot-ID und offline vergleichen.
+    pid = _pid_by_puuid(parts, ident)
+    if pid is not None:
+        return pid
+    client = _build_client(cfg, match["metadata"]["matchId"])
+    acc = client.account_by_puuid(ident)
+    name = str((acc or {}).get("gameName") or "").strip()
+    tag = str((acc or {}).get("tagLine") or "").strip()
+    if name:
+        pid = _pid_by_riot_id(parts, name, tag)
+        if pid is not None:
+            return pid
+    log("[postgame] PUUID nicht im Match gefunden - eigener Spieler unbestimmt "
+        "(gecachtes Match eines anderen API-Keys? Dann 'me: Name#Tag' setzen).")
+    return None
+
+
+def _pid_by_riot_id(parts: list, name: str, tag: str):
+    """participantId per Riot-ID-Vergleich (case-insensitiv, ohne API-Call).
+
+    Key-unabhaengig und damit der verlaessliche Weg gegen gecachte Matches -
+    genutzt von BEIDEN Zweigen in `resolve_me_pid` (Riot-ID direkt und die per
+    account-v1 zu einer PUUID nachgeschlagene Riot-ID)."""
+    name_l, tag_l = name.strip().lower(), tag.strip().lower()
+    for p in parts:
+        if (str(p.get("riotIdGameName", "")).strip().lower() == name_l
+                and str(p.get("riotIdTagline", "")).strip().lower() == tag_l):
+            return p.get("participantId")
+    return None
 
 
 def _pid_by_puuid(parts: list, puuid: str):

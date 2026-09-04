@@ -12,6 +12,14 @@ Stance-Logik:
   struggling (schlechte KDA / viele Tode)  -> defensiv
   ahead (gute KDA und Gold-Vorsprung)      -> aggressiv
   sonst                                    -> ausgewogen
+
+Quer dazu liegt der SPIELSTIL-REGLER (rec_style, plan_spielstil.md): eine
+bewusste Nutzer-Vorgabe ueber `Weights.style_tilt` in [-1, +1] (fuenf
+Frontend-Stufen, `PLAYSTYLE_TILT`), die die Empfehlung Richtung tanky bzw.
+Glass Cannon verschiebt - Pool-Scores, Boots-Wahl, Defensiv-Reserve und
+Archetyp. Die Stance beschreibt, WIE das Spiel laeuft, der Regler sagt, WELCHE
+Rolle der Spieler im Team spielen will; beide duerfen sich widersprechen. Bei
+Tilt 0 (Default) ist das Verhalten byte-identisch zu dem ohne Regler.
 """
 
 from . import champions, items, knowledge, profiling
@@ -20,12 +28,18 @@ from . import champions, items, knowledge, profiling
 # auf `recommend.<name>` zu (auch auf die Unterstrich-Namen und Konstanten) -
 # darum durchgehend das noqa: F401.
 from .rec_weights import (  # noqa: F401  Fassade, Modul-Split T1
-    CC_HEAVY_THRESHOLD, CONF_RICH_MIN, DEFAULT_WEIGHTS, RANK_MIN_N, SHRINK_K,
-    Weights,
+    CC_HEAVY_THRESHOLD, CONF_RICH_MIN, DEFAULT_WEIGHTS, PLAYSTYLE_DEFAULT,
+    PLAYSTYLE_TILT, RANK_MIN_N, SHRINK_K, Weights, tilt_for_level,
+)
+from .rec_style import (  # noqa: F401  Fassade, Spielstil-Regler (S-01)
+    add_style_reason, class_overlay_active, effective_stance, overlay_entries,
+    overlay_usable, style_axis, style_factor, style_label, style_note,
+    style_reason_suffix,
 )
 from .rec_context import (  # noqa: F401  Fassade, Modul-Split T1
-    _REDUNDANT_TAGS, _RecContext, _enemy_damage_bucket, _redundant_stack,
-    _shrunk, _spike_warnings, _synergy_boost, _tag_role, confidence_tier,
+    _REDUNDANT_TAGS, _RecContext, _enemy_damage_bucket, _enemy_heal_bucket,
+    _redundant_stack, _shrunk, _spike_warnings, _synergy_boost, _tag_role,
+    confidence_tier,
 )
 from .rec_stance import (  # noqa: F401  Fassade, Struktur-Review 2026-07-17 T2
     STATE_LEAD_GOLD,
@@ -52,7 +66,7 @@ from .rec_boots import (  # noqa: F401  Fassade, Modul-Split T3
     _boots_cc_key, _boots_cells, _boots_class, _boots_comp_hint,
     _boots_cond_boost, _boots_defensive_want, _boots_kb, _boots_pool_entry,
     _boots_pool_score, _boots_scored, _boots_scored_recs, _boots_slot_merge,
-    _cell_total, _choose_boots,
+    _cell_total, _choose_boots, _style_boots_options, _style_boots_targets,
 )
 from .rec_situational import (  # noqa: F401  Fassade, Modul-Split T4/T6
     DEF_SLOT_MIN_N, SITUATIONAL_SHOWN, _behind_row, _conditional_layers,
@@ -62,8 +76,9 @@ from .rec_situational import (  # noqa: F401  Fassade, Modul-Split T4/T6
 )
 from .rec_display import (  # noqa: F401  Fassade, Modul-Split T5
     _POOL_EXCLUDED_FLAGS, _boots_gate_open, _boots_slot_supported,
-    _boots_visible, _completed_legendaries, _defensive_bridge, _display_blocked,
-    _display_order, _next_only_filter, _now_rel, _path_winner, _pool_excluded,
+    _boots_visible, _class_only, _completed_legendaries, _defensive_bridge,
+    _display_blocked, _display_order, _next_only_filter, _now_rel,
+    _path_winner, _pool_excluded,
 )
 from .rec_plan import (  # noqa: F401  Fassade, Modul-Split T6
     ITEM_SLOTS, PLAN_CAP, _elixir_next, _finished_unit, _kb_avg_slot,
@@ -80,7 +95,9 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
                    champion_id: str | None,
                    ally_gold_spent: int | None = None,
                    bot_partner: dict | None = None,
-                   death_signal: dict | None = None) -> _RecContext:
+                   death_signal: dict | None = None,
+                   my_keystone_id: int | None = None,
+                   my_keystone_name: str | None = None) -> _RecContext:
     """Phase 1 (Befund S1): KB-/Kontext-Aufbau - Rolle, Threat, Split, CC, Lead,
     Stance, Archetyp. Baut das _RecContext-Objekt fuer die folgenden Phasen."""
     # Stabile Data-Dragon-ID fuer alle internen Lookups (Fix 5.7): KB, Klassen-
@@ -99,6 +116,20 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
     # braucht denselben Bucket fuer ihre boots_by_threat-Zelle - gleiche
     # Rechnung, nur eine Phase frueher.
     enemy_bucket = _enemy_damage_bucket(enemy_profiles)
+    # Heal-Last des Gegnerteams (by_heal): EIGENE Dimension neben AD/AP - ein
+    # Gegnerteam kann gleichzeitig AD-lastig UND heal-lastig sein. Bei
+    # abgeschalteter Schicht (heal_factor == 0, Default bis zum Gate) wird der
+    # Bucket gar nicht erst gebildet, dann bleibt der Layer restlos stumm.
+    heal_bucket = (_enemy_heal_bucket(enemy_profiles)
+                   if weights.heal_factor > 0.0 else None)
+    # Eigene Hauptrune (by_keystone): die einzige Dimension, die auf etwas am
+    # SPIELER SELBST konditioniert, nicht auf die Gegner-Comp. Bei
+    # abgeschalteter Schicht (keystone_factor == 0, Default bis zum Gate) wird
+    # die Rune gar nicht uebernommen - dann bleibt der Layer restlos stumm, egal
+    # was der Aufrufer liefert. Fehlt sie (alte Dumps, Demo, Backtest ohne
+    # Perks), ist sie None und die Schicht bleibt ebenso stumm.
+    keystone_id = (my_keystone_id if weights.keystone_factor > 0.0 else None)
+    keystone_name = my_keystone_name if keystone_id else None
     # Gemessenes Item-Gold des eigenen Spielers (identisch zur profiling-Metrik:
     # Summe gold.total des Inventars). Basis fuer beide Vorspruenge.
     my_gold_spent = items.categorize_gold(owned_ids or [])["gold_total"]
@@ -124,7 +155,13 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
     # Ohne "builds" (Alt-Schema) faellt es auf die globalen core/situational
     # zurueck - so bleibt es abwaertskompatibel.
     if weights.use_archetypes:
-        build, build_reason = _select_archetype(kb.get("builds", []), owned_names, stance)
+        # Spielstil-Regler (plan_spielstil.md F1d): bei Teil-Gleichstand
+        # entscheidet nicht die LAGE, sondern die Ansage des Spielers - genau
+        # die Frage, die der Archetyp-Tilt beantwortet ("welche Rolle spiele ich
+        # in diesem Team?"). Bei Tilt 0 bleibt es die Lage-Stance.
+        build, build_reason = _select_archetype(
+            kb.get("builds", []), owned_names,
+            effective_stance(stance, weights.style_tilt))
     else:
         # Ablation: Archetyp-Auswahl abschalten -> Fallback auf globales
         # core/situational (Alt-Schema-Pfad).
@@ -171,7 +208,8 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
         game_time=game_time, current_gold=current_gold, weights=weights,
         bot_partner=bot_partner, death_signal=death_signal,
         kb=kb, top=top, split=split, enemy_cc_score=enemy_cc_score,
-        enemy_bucket=enemy_bucket,
+        enemy_bucket=enemy_bucket, heal_bucket=heal_bucket,
+        keystone_id=keystone_id, keystone_name=keystone_name,
         fielded_lead=f_lead, earned_lead=e_lead,
         gold_state=gold_state, stance=stance, stance_reason=stance_reason,
         build=build, build_reason=build_reason, core_source=core_source,
@@ -220,8 +258,17 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
         "stance_reason": ctx.stance_reason,
         # Klarstellung, dass die Item-Empfehlung trotz defensiver Stance der
         # gelernten Kaufreihenfolge folgt (Befund H, review-2026-07-15.md /
-        # Befund D, 2026-07-13). Leer, wenn die Stance nicht defensiv ist.
-        "stance_note": _stance_note(ctx.stance),
+        # Befund D, 2026-07-13). Leer, wenn die Stance nicht defensiv ist - und
+        # bei aktivem Spielstil-Regler, weil ihre Aussage ("folgt bewusst weiter
+        # der gelernten High-Elo-Reihenfolge") dann schlicht falsch waere. An
+        # ihre Stelle tritt die `style_note`.
+        "stance_note": ("" if ctx.weights.style_tilt
+                        else _stance_note(ctx.stance)),
+        # Spielstil-Regler (plan_spielstil.md): Echo des Tilts fuer YAML-Export
+        # und Nachvollziehbarkeit, plus der erklaerende Satz (leer bei 0).
+        "style_tilt": ctx.weights.style_tilt,
+        "style_note": style_note(ctx.weights.style_tilt, ctx.champion,
+                                 ctx.used_role),
         "enemy_damage_split": ctx.split,
         "enemy_cc_score": ctx.enemy_cc_score,
         # Todes-Signal aus dem Kill-Feed (V2-08) - None, solange nichts scharf
@@ -291,15 +338,22 @@ def recommend(champion: str, role: str | None, owned_names: set[str],
               champion_id: str | None = None,
               ally_gold_spent: int | None = None,
               bot_partner: dict | None = None,
-              death_signal: dict | None = None) -> dict:
+              death_signal: dict | None = None,
+              my_keystone_id: int | None = None,
+              my_keystone_name: str | None = None) -> dict:
     """Orchestrator (Struktur-Review 2026-07-17 T3, Befund S1): baut den Kontext
     auf und ruft die Phasen-Helfer in fester Reihenfolge - Core-Pick, Boots
     (KB- und Klassen-Pfad), konditionale Schichten, situatives Scoring,
-    Anti-Heal, Result-Assembly. Die eigentliche Logik liegt in den _*-Helfern."""
+    Anti-Heal, Result-Assembly. Die eigentliche Logik liegt in den _*-Helfern.
+
+    `my_keystone_id`/`my_keystone_name`: Perk-ID und (optional) Anzeigename der
+    EIGENEN Hauptrune fuer die by_keystone-Schicht. Beide optional und
+    None-sicher - Aufrufer ohne Runen-Wissen (Demo, alte Live-Dumps, Backtest
+    ohne Perks) verhalten sich exakt wie vorher."""
     ctx = _build_context(champion, role, owned_names, my_scores, enemy_profiles,
                          game_time, current_gold, owned_ids, my_level, ally_items,
                          weights, champion_id, ally_gold_spent, bot_partner,
-                         death_signal)
+                         death_signal, my_keystone_id, my_keystone_name)
     recs: list[dict] = []
     # 1. Naechstes Core-Item
     _core_pick(ctx, recs)

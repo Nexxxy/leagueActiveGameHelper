@@ -52,6 +52,62 @@
   #plan .step.upgrade { border-style: dashed; border-color: var(--balanced); }
   #plan .chevron { flex: none; color: var(--muted); font-weight: 700;
                    font-size: 1.1rem; }
+  /* Spielstil-Regler (plan_spielstil.md): bewusste NUTZER-Vorgabe "wie tanky
+     bzw. wie sehr auf Schaden soll die Empfehlung schauen". Sitzt in der
+     KOPFZEILE (rechts vom Refresh-Knopf), weil er auf alles darunter wirkt
+     (Next, Kaufplan, gewichtete Liste) - zwischen den Bl&ouml;cken sah er aus
+     wie eine Einstellung nur f&uuml;r den n&auml;chsten Block. Mittig ueber
+     `margin: 0 auto`, also im freien Platz der Zeile: eine absolute Zentrierung
+     (position:absolute) w&uuml;rde sich bei normalen Fensterbreiten ueber die
+     Meta-Zeile schieben, im Fluss bricht der Block statt dessen sauber in die
+     n&auml;chste Kopfzeilen-Reihe um (.top hat flex-wrap). Dezent gehalten - er
+     ordnet die Empfehlung um, er ist kein zweites Ranking. Farbwelt aus der
+     Stance (defensiv-blau links, gr&uuml;n neutral, aggressiv-rot rechts),
+     damit "links = halten, rechts = zuschlagen" ohne Legende lesbar ist. */
+  /* [hidden] explizit auf display:none pinnen (gleiche Falle wie beim
+     Report-Banner): der Regler ist nur waehrend eines Spiels sichtbar, weil der
+     Server ihn bei jedem neuen Spiel auf Neutral zuruecksetzt - eine
+     Vorab-Einstellung ohne Spiel waere wirkungslos. */
+  #styleblock[hidden] { display: none; }
+  #styleblock { flex: 0 0 auto; margin: 0 auto; max-width: 100%; }
+  .stylerow { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .stylecap { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
+              color: var(--muted); padding-top: 2px; }
+  /* Kompakt genug fuer EINE Kopfzeilen-Zeile: mit Beschriftung ~330 px breit. */
+  .stylectl { width: 260px; max-width: 100%; }
+  #styleRange { -webkit-appearance: none; appearance: none; display: block;
+                width: 100%; height: 6px; margin: 4px 0 0; border-radius: 3px;
+                border: 1px solid var(--border); cursor: pointer;
+                background: linear-gradient(90deg, var(--defensive) 0%,
+                            var(--balanced) 50%, var(--aggressive) 100%); }
+  #styleRange:focus { outline: none; }
+  #styleRange:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+  /* Thumb doppelt: WebKit/Blink und Gecko teilen sich keine Pseudo-Elemente,
+     und ein zusammengefasster Selektor wuerde von beiden verworfen. */
+  #styleRange::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+                width: 16px; height: 16px; border-radius: 50%; cursor: pointer;
+                background: var(--text); border: 2px solid var(--card);
+                box-shadow: 0 0 5px rgba(0, 0, 0, .7); }
+  #styleRange::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%;
+                cursor: pointer; background: var(--text);
+                border: 2px solid var(--card);
+                box-shadow: 0 0 5px rgba(0, 0, 0, .7); }
+  /* Die f&uuml;nf Beschriftungen unter den Rastpunkten: gleiche Breite wie der
+     Regler, f&uuml;nf gleich breite Spalten - so sitzt jede Beschriftung unter
+     ihrer Stufe. Die aktive Stufe wird hervorgehoben (.on), der Rest bleibt
+     gemuted. */
+  .styleticks { display: grid; grid-template-columns: repeat(5, 1fr);
+                font-size: .68rem; color: var(--muted); margin-top: 4px; }
+  .styleticks span { text-align: center; cursor: default; }
+  .styleticks span:first-child { text-align: left; }
+  .styleticks span:last-child { text-align: right; }
+  .styleticks span.on { color: var(--text); font-weight: 700; }
+  /* Die Erklaerzeile bleibt im INHALT (nicht in der Kopfzeile): sie ist ein
+     ganzer Satz und wuerde die einzeilige Kopfzeile sprengen; ausserdem erklaert
+     sie genau die Bloecke, ueber denen sie steht. Die Raender uebernehmen den
+     Abstand, den frueher der Regler-Block hatte - ist der Text leer, kollabieren
+     sie mit dem Rand der folgenden Ueberschrift, es entsteht keine Luecke. */
+  #styleNote { margin: 20px 0 4px; }
   #confidence { margin: 2px 0 6px; }
   #confidence .badge { display: inline-block; padding: 2px 10px; border-radius: 20px;
             font-weight: 600; font-size: .72rem; background: var(--aggressive);
@@ -200,6 +256,28 @@
     <span class="muted" id="meta"></span>
     <span class="muted" id="countdown"></span>
     <button id="refreshBtn" title="Jetzt aktualisieren" onclick="refresh()">&#10227;</button>
+
+    <!-- Spielstil-Regler: steht STATISCH hier (und nicht in einem per innerHTML
+         neu gebauten Container), damit der direkt registrierte Listener jedes
+         Neurendern ueberlebt und der Schieber beim Ziehen nicht wegspringt.
+         Sichtbarkeit uebernimmt render() mit derselben Bedingung wie fuer
+         #game - ohne laufendes Spiel gibt es nichts zu gewichten. -->
+    <div id="styleblock" hidden>
+      <div class="stylerow">
+        <span class="stylecap">Spielstil</span>
+        <div class="stylectl">
+          <input type="range" id="styleRange" min="1" max="5" step="1" value="3"
+                 aria-label="Spielstil: 1 = tanky, 3 = neutral, 5 = maximal Schaden">
+          <div class="styleticks" id="styleTicks">
+            <span title="Hard defensive / tanky (HP-Fokus)">Tank</span>
+            <span title="Tanky, aber aggressiver">Tanky</span>
+            <span title="Neutral &ndash; die normale High-Elo-Empfehlung (Default)">Neutral</span>
+            <span title="Leicht aggressiv">Aggressiv</span>
+            <span title="I can carry &ndash; maximal Schaden">Carry</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <a id="reportBanner" href="#" target="_blank" rel="noopener" hidden></a>
@@ -209,6 +287,12 @@
   <div id="game" hidden>
     <h2>Du</h2>
     <div class="card" id="me"></div>
+
+    <!-- Erklaerzeile zum Reglerstand (der Regler selbst sitzt in der Kopfzeile):
+         bleibt hier im Inhalt, direkt ueber den Bloecken, deren Abweichung von
+         der Datenwahrheit sie begruendet. Wird nur gefuellt, wenn die Engine
+         etwas zu sagen hat - bei Stufe 3 bleibt sie leer. -->
+    <div id="styleNote" class="muted"></div>
 
     <h2>N&auml;chstes Item</h2>
     <div id="confidence"></div>
@@ -283,6 +367,29 @@ async function setPriority(champion, priority) {
   refresh();
 }
 
+// --- Spielstil-Regler -------------------------------------------------------
+// Der Server ist die einzige Wahrheit ueber die Stufe (er setzt sie bei jedem
+// neuen Spiel auf 3 zurueck), das Frontend spiegelt sie nur. Waehrend der Nutzer
+// zieht, darf ein zwischendurch eintreffender Render den Schieber aber nicht
+// unter dem Finger wegziehen - dafuer das Flag plus die activeElement-Pruefung
+// (deckt auch die Tastaturbedienung ab, die kein pointerdown ausloest).
+let styleDragging = false;
+
+function markStyleLevel(level) {
+  const ticks = document.getElementById("styleTicks").children;
+  for (let i = 0; i < ticks.length; i++) {
+    ticks[i].classList.toggle("on", i + 1 === level);
+  }
+}
+
+async function setPlaystyle(level) {
+  await fetch("/api/playstyle", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({level}),
+  });
+  refresh();
+}
+
 function enemyCard(e, spike) {
   const ad = Math.round(e.damage_split.ad * 100);
   const ap = Math.round(e.damage_split.ap * 100);
@@ -294,7 +401,7 @@ function enemyCard(e, spike) {
   return `<div class="card enemy">
     <div class="name"><span>${esc(e.name)}
       ${e.role ? `<span class="muted">${esc(e.role)}</span>` : ""}</span>
-      <span class="threat" title="Anteil an der Team-Bedrohung (inkl. deiner Prio)">⚠ ${e.threat_share != null ? Math.round(e.threat_share * 100) + " %" : e.threat_score}</span></div>
+      <span class="threat" title="Absolute Gefährlichkeit (Erwartung nach Spielzeit; inkl. deiner Prio)">⚠ ${e.threat_pct != null ? Math.round(e.threat_pct * 100) + " %" : e.threat_score}</span></div>
     ${spikeLine}
     <div class="profile">${esc(e.build_profile)} · ${e.gold_spent} G · KDA ${e.kda}</div>
     <div class="bar"><div class="ad" style="width:${ad}%"></div>
@@ -311,6 +418,11 @@ function render(s) {
   const game = s.phase === "in_game" || s.phase === "post_game";
   document.getElementById("nogame").hidden = game;
   document.getElementById("game").hidden = !game;
+  // Der Regler in der Kopfzeile lebt ausserhalb von #game und braucht deshalb
+  // sein eigenes Umschalten - mit derselben Bedingung: ohne laufendes Spiel
+  // waere eine Vorab-Einstellung wirkungslos, weil der Server die Stufe bei
+  // jedem neuen Spiel auf Neutral zuruecksetzt.
+  document.getElementById("styleblock").hidden = !game;
   let meta = `Patch ${s.patch}`;
   if (game) meta += ` · ${Math.floor(s.game_time / 60)} min`;
   if (s.phase === "post_game") meta += " · Spiel beendet – letzter Stand";
@@ -338,6 +450,18 @@ function render(s) {
      ${p.scores.kills}/${p.scores.deaths}/${p.scores.assists} ·
      ${p.gold_spent} G ausgegeben
      <div class="itemlist">${p.items.join(", ") || "keine Items"}</div>`;
+
+  // Reglerstand vom Server uebernehmen - ausser der Nutzer zieht gerade daran.
+  const slider = document.getElementById("styleRange");
+  const lvl = s.playstyle && s.playstyle.level;
+  if (lvl && !styleDragging && document.activeElement !== slider) {
+    slider.value = lvl;
+    markStyleLevel(lvl);
+  }
+  // style_note erklaert, WARUM die Empfehlung von der Datenwahrheit abweicht
+  // (die Engine laesst sie bei Stufe 3 leer, dann steht hier nichts).
+  document.getElementById("styleNote").innerHTML =
+    r.style_note ? esc(r.style_note) : "";
 
   const n = r.next;
   if (n) {
@@ -486,6 +610,24 @@ document.getElementById("enemies").addEventListener("change", ev => {
   const sel = ev.target.closest("select.prio");
   if (sel) setPriority(sel.dataset.champion, sel.value);
 });
+
+// Der Regler-Block wird nie neu gebaut -> direkte Listener genuegen.
+// `input` feuert bei jeder Bewegung (nur die Beschriftung mitziehen, kein
+// Request pro Pixel), `change` erst beim Loslassen - dann geht der POST raus.
+document.getElementById("styleRange").addEventListener("pointerdown", () => {
+  styleDragging = true;
+});
+document.getElementById("styleRange").addEventListener("input", ev => {
+  markStyleLevel(Number(ev.target.value));
+});
+document.getElementById("styleRange").addEventListener("change", ev => {
+  setPlaystyle(Number(ev.target.value));
+});
+// Am document, nicht am Regler: wer ausserhalb loslaesst, bekommt sonst nie ein
+// pointerup und das Flag bliebe fuer immer stehen (der Schieber wuerde danach
+// nie wieder mit dem Server synchronisieren).
+document.addEventListener("pointerup", () => { styleDragging = false; });
+document.addEventListener("pointercancel", () => { styleDragging = false; });
 
 // --- Item-Tooltip (Hover ueber ein Item-Icon) -------------------------------
 // Zeigt die englische Data-Dragon-Beschreibung (Name, Preis, Kurztext, Stats/

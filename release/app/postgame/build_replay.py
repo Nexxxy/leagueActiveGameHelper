@@ -528,7 +528,7 @@ def evaluate_player(ser: dict, pid, ranked_names: dict, core_by_pid: dict,
                 ser, ranked_names, enemy_pids, p_idx, minute)
             enemies = [enemy_profile(q, inv, e_kda, cs, level, pid_meta)
                        for q in enemy_pids]
-            profiling.add_threat_scores(enemies, {})
+            profiling.add_threat_scores(enemies, {}, minute * 60.0)
             ally_items = {n for q in ally_pids
                           for n in (app_items.name_of(i)
                                     for i in (_at(players.get(q, {}).get("items_ts", []),

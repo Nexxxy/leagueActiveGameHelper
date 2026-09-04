@@ -157,9 +157,12 @@ def extract_record(report: dict) -> dict:
     wenn der Report key-frei ist (die Aggregation ueberspringt sie).
 
     Zusaetzlich fuer die Match-History-Seite (2026-07-29): `damage_status`
-    (Daten-Qualitaet des Reports) und `roster` (die 10 Champions als
-    Wiederfinde-Schluessel fuer den Retry). Aeltere Records ohne diese Felder
-    bleiben gueltig - alle Leser nutzen `.get()`.
+    (Daten-Qualitaet des Reports), `roster` (die 10 Champions als
+    Wiederfinde-Schluessel fuer den Retry), `players` (die 10 vollen
+    Riot-IDs als Grundlage des Spieler-Filters) und `participants` (dieselben
+    10 Spieler MIT Zuordnung: `{name, champ, role, ally}`, damit die gefilterte
+    Ansicht die Zeile aus SEINER Perspektive zeigen kann). Aeltere Records ohne
+    diese Felder bleiben gueltig - alle Leser nutzen `.get()`.
 
     Die Record-ID ist die echte Match-ID, sobald bekannt (`enriched_match_id` aus
     dem Capture-Enrichment), sonst `match_id` (im Capture-Pfad der `live_<...>`-
@@ -184,6 +187,34 @@ def extract_record(report: dict) -> dict:
               (report.get("ranked_names") or {}).values()]
     roster = [c for c in roster if c]
 
+    # Teilnehmer-Tabelle (Name -> Champion/Rolle/Seite) fuer den Spieler-Filter
+    # der Match-History. WARUM mit Zuordnung: filtert der Nutzer auf einen
+    # MITSPIELER, muss die Zeile dessen Champion/Rolle/Ergebnis zeigen - eine
+    # reine Namensliste wuerde weiter die me-Perspektive des Reports anzeigen.
+    # `ally` sagt, ob der Teilnehmer im Team des me-Spielers stand (dessen
+    # `win` gilt dann unveraendert, sonst gespiegelt); ohne bekannte eigene
+    # Seite bleibt es None - dann ist das Ergebnis nicht umrechenbar.
+    ranked = report.get("ranked_names") or {}
+    my_team = (ranked.get(me.get("pid")) or {}).get("team")
+    participants = []
+    for info in ranked.values():
+        info = info or {}
+        pname = str(info.get("name") or "").strip()
+        if not pname:
+            continue
+        team = info.get("team")
+        participants.append({
+            "name": pname, "champ": info.get("champ"),
+            "role": info.get("role"),
+            "ally": (team == my_team) if (my_team is not None
+                                         and team is not None) else None,
+        })
+
+    # Volle Riot-IDs aller 10 Teilnehmer ('Name#Tag') als Grundlage des
+    # Filter-Treffers: der Record ist die EINZIGE Quelle mit Tagline - die
+    # gerenderte HTML zeigt Namen bewusst ohne sie (s. render._disp_name).
+    players = [p["name"] for p in participants]
+
     return {
         "match_id": record_id,
         # Stempel, unter dem die HTML-Datei liegt. Normalerweise die eigene
@@ -200,6 +231,16 @@ def extract_record(report: dict) -> dict:
         "queue": report.get("queue"),
         "date_ms": int(date_ms),
         "win": report.get("win") if report.get("outcome_known") else None,
+        # Remake (Early Surrender < 5 min): die Match-History zeigt dafuer einen
+        # neutralen Chip und laesst das Spiel aus der Winrate fallen. Alt-Records
+        # ohne das Feld verhalten sich wie bisher (kein Migrationslauf).
+        "remake": bool(report.get("remake")),
+        # Stand des Report-Generators (postgame.REPORT_VERSION), mit dem der
+        # Report gebaut wurde. Die Match-History vergleicht ihn mit dem
+        # aktuellen Stand und bietet fuer aeltere Reports den Fix-Button an.
+        # Alt-Records ohne das Feld bleiben gueltig (None = unbekannt -> gilt
+        # als veraltet, kein Migrationslauf).
+        "report_version": report.get("report_version"),
         "has_damage": has_damage,
         # Daten-Qualitaet des Reports (ok/pending/failed/no_key/disabled) fuer
         # die Match-History-Seite. Der Timeline-Pfad setzt kein `damage_status`
@@ -207,6 +248,8 @@ def extract_record(report: dict) -> dict:
         "damage_status": (report.get("damage_status")
                           or ("ok" if has_damage else None)),
         "roster": roster,
+        "players": players,
+        "participants": participants,
         "deltas": _total_deltas(me_card, has_damage),
         # Impact-Quote ist key-gebunden (Schaden/Heilung/Tank) -> key-frei leer.
         "impact_quote": _impact_quote(report) if has_damage else None,
@@ -312,7 +355,13 @@ def load_records(cfg, ident: str | None, *, log=print) -> tuple[list, bool]:
     `ident` = Riot-ID 'Name#Tag' oder PUUID; ohne '#' und lang genug gilt es als
     PUUID. Ohne Identitaet werden ALLE Records genommen (mit Warnhinweis - dann
     koennen fremde Spiele mit drin sein). Rueckgabe (records, gefiltert): die nach
-    Datum absteigend sortierten Records und ob nach Identitaet gefiltert wurde."""
+    Datum absteigend sortierten Records und ob nach Identitaet gefiltert wurde.
+
+    Sonderfall PUUID-Identitaet ohne einen einzigen Treffer: PUUIDs sind PRO
+    API-KEY verschluesselt, die Record-PUUIDs stammen also vom jeweils holenden
+    Key. Eine von aussen gereichte PUUID filtert dann alle eigenen Records weg.
+    Das wird GELOGGT statt still hingenommen - aber NICHT geheilt: ungefiltert
+    weiterzumachen wuerde fremde Spiele in den Trend mischen."""
     d = trend_dir(cfg)
     records = []
     if d.exists():
@@ -332,6 +381,11 @@ def load_records(cfg, ident: str | None, *, log=print) -> tuple[list, bool]:
                 sel.append(rec)
             elif is_puuid and rec.get("puuid") == ident:
                 sel.append(rec)
+        if is_puuid and records and not sel:
+            log("[postgame] PUUID-Filter fand keine Records (0 von "
+                f"{len(records)}) - PUUIDs sind pro API-Key verschluesselt, "
+                "eine fremde PUUID trifft die eigenen Records nie. Nutze "
+                "`me: Name#Tag` in der config.")
         records = sel
         filtered = True
     else:

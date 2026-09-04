@@ -106,6 +106,35 @@ def class_buckets(version: str, cache_dir: Path) -> dict[str, str]:
     return buckets
 
 
+@lru_cache(maxsize=4)
+def partypes(version: str, cache_dir: Path) -> dict[str, str]:
+    """Data-Dragon-ID -> Ressourcen-Typ (`partype`): 'Mana', 'Fury', 'Energy',
+    'None' (ressourcenlos, ein STRING - so liefert Data Dragon es aus) ...
+
+    Gleiches Muster wie `class_buckets`/`damage_priors`: einmal je Version
+    gecacht, Quelle ist `sr_champion_data` (ohne Modus-Varianten). Leere Werte
+    fallen weg, damit die Leseseite 'unbekannt' von 'kennt keine Ressource'
+    unterscheiden kann."""
+    data = ddragon.sr_champion_data(version, cache_dir)
+    return {info["id"]: info["partype"] for info in data.values()
+            if info.get("partype")}
+
+
+def partype_for_id(cid: str | None) -> str | None:
+    """Data-Dragon-ID -> `partype` ('Mana', 'Fury', ...) oder None, wenn der
+    Champion unbekannt ist bzw. Data Dragon nichts liefert.
+
+    Gebraucht vom Spielstil-Klassen-Overlay (plan_spielstil.md F3): ein
+    Mana-Item aus dem Klassen-Pool ist fuer einen Fury-Champion (Briar) schlicht
+    Unsinn. Bewusst None statt eines Rate-Werts fuer Unbekanntes - der Aufrufer
+    filtert dann NICHT (kein Ausschluss auf Verdacht, gleiche Regel wie bei
+    `ad_share_for_id`)."""
+    if not cid:
+        return None
+    version, cache_dir = _resolver_ctx()
+    return partypes(version, cache_dir).get(cid)
+
+
 def resolve_id(champion_display_name: str) -> str | None:
     """Live-Anzeigename ('Bel'Veth', 'Wukong') -> Data-Dragon-ID ('Belveth',
     'MonkeyKing') oder None. Duenne Huelle um ddragon.resolve_name mit dem

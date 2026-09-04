@@ -58,6 +58,66 @@ def _cum_gain(seq: list, a: int, b, n: int) -> int:
     return (seq[b] or 0) - (seq[a] or 0)
 
 
+# --- Aufzeichnungs-Guard (spaet gestartetes Live-Capture) -------------------
+#
+# Startet das Live-Capture erst mitten im Spiel, fuellt der Serien-Builder die
+# Minuten davor mit den Werten des ersten Snapshots auf (dichte Listen ab Minute
+# 0, s. live_series). Diese Frames sind ERFUNDEN; `data_start` (Feld der Serien
+# UND des Report-Modells) traegt die erste GEMESSENE Minute.
+#
+# Der Renderer graut den Bereich davor in den Charts aus - die Analyse rechnet
+# ihn hier gar nicht erst mit: keine Zahl und kein Satz darf auf aufgefuellten
+# Frames beruhen (Projekt-Prinzip: lieber keine Aussage als eine erfundene). Eine
+# Phase ganz vor `data_start` liefert darum KEINEN Wert (statt einer 0, die sich
+# wie "nichts getan" liest), eine teilweise abgedeckte rechnet ueber ihren echten
+# Teil.
+#
+# `data_start == 0` - Timeline-Pfad IMMER, Live-Capture ab Spielbeginn, alte
+# persistierte Reports ohne das Feld - laesst JEDEN Guard wirkungslos: dort
+# bleibt das Verhalten exakt das alte (Regressions-Anker).
+
+def clamp_data_start(data_start, n: int) -> int:
+    """`data_start` robust auf 0..n begrenzen (fehlendes/kaputtes Feld -> 0).
+
+    EINE Quelle fuer Analyse und Renderer (`render._clamp_data_start` ist nur
+    noch eine Huelle darum) - zwei Auslegungen desselben Feldes waeren Drift."""
+    return min(_guard_start(data_start), max(0, n))
+
+
+def _guard_start(data_start) -> int:
+    """`data_start` als nicht-negative Minute (fehlend/kaputt -> 0), OHNE obere
+    Grenze.
+
+    Fuer die Serien-Auswertungen, die keine feste Frame-Zahl kennen (Kipp-Punkt,
+    Einseitig-Aussage): dort wird `ds` nur als Slice-/Schleifen-Untergrenze
+    benutzt, ein zu grosser Wert ist also von sich aus harmlos - waehrend ein
+    Clamp gegen die falsche Serie den Guard stillschweigend abschalten koennte."""
+    try:
+        return max(0, int(data_start or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def phase_window(a: int, b, n: int, ds: int):
+    """Phasenfenster [a, b] auf die GEMESSENEN Frames beschnitten.
+
+    Rueckgabe `(a, b)` mit nach hinten geschobenem Start - oder **None**, wenn
+    die Phase komplett vor `ds` liegt (dann gibt es fuer sie schlicht nichts zu
+    berichten). Das ENDE bleibt unangetastet (auch `b=None` = Spielende), damit
+    die Fenster-Semantik der Konsumenten (`_cum_gain` inklusiv, `_vision_actions`
+    halboffen) unveraendert bleibt.
+
+    `ds <= 0` gibt das Fenster unveraendert zurueck - der Guard greift
+    ausschliesslich bei spaet gestartetem Capture."""
+    if ds <= 0:
+        return (a, b)
+    last = max(0, n - 1)
+    b_eff = last if b is None else min(b, last)
+    if max(a, ds) >= b_eff:
+        return None
+    return (max(a, ds), b)
+
+
 def _vision_actions(events: list, pid: int, a: int, b, n: int) -> int:
     """Ward-Aktionen (gelegt + zerstoert) eines Spielers im Minutenfenster [a, b).
 
@@ -79,22 +139,44 @@ def _vision_actions(events: list, pid: int, a: int, b, n: int) -> int:
     return cnt
 
 
+def _blank_metrics() -> dict:
+    """Metrik-Block einer NICHT aufgezeichneten Phase: ueberall None.
+
+    Kein 0 - eine 0 laese sich wie 'nichts getan', und genau das weiss niemand.
+    Alle Konsumenten (Verdikt-Zeilen, Renderer) ueberspringen None-Deltas
+    ohnehin, die Phase faellt damit stillschweigend aus jeder Aussage."""
+    return {m: {"me": None, "opp": None, "delta": None}
+            for m in ("gold", "cs", "dmg", "vision")}
+
+
 def phase_deltas(series: dict, pid: int, opp: int | None, role: str) -> list:
     """Phasen-Deltas Spieler vs. Gegenpart (roh) je Metrik.
 
     Rueckgabe: Liste je Phase mit {key, label, focus, metrics:{gold,cs,dmg,
     vision}}. Jede Metrik ist ein Dict {me, opp, delta} des Phasen-Zuwachses
     (Delta = me - opp). Ohne Gegenpart bleibt opp/delta None (nur eigene Werte).
-    `focus` markiert die rollen-relevante Metrik (ROLE_FOCUS)."""
+    `focus` markiert die rollen-relevante Metrik (ROLE_FOCUS).
+
+    `series["data_start"]` (fehlend -> 0) traegt den Aufzeichnungs-Guard: Phasen
+    ganz vor der ersten gemessenen Minute bekommen `covered: False` und ueberall
+    None statt erfundener Zuwaechse, teilweise abgedeckte rechnen ab `data_start`
+    (s. `phase_window`)."""
     players = series["players"]
     n = series["n_frames"]
     wards = series["events"]["wards"]
+    ds = clamp_data_start(series.get("data_start", 0), n)
     me = players.get(pid, {})
     op = players.get(opp, {}) if opp is not None else {}
     focus = ROLE_FOCUS.get(role, "gold")
 
     out = []
     for key, label, a, b in PHASES:
+        win = phase_window(a, b, n, ds)
+        if win is None:
+            out.append({"key": key, "label": label, "focus": focus,
+                        "metrics": _blank_metrics(), "covered": False})
+            continue
+        a, b = win
         metrics: dict[str, dict] = {}
         for metric in ("gold", "cs", "dmg"):
             mine = _cum_gain(me.get(metric, []), a, b, n)
@@ -738,8 +820,8 @@ def _verdict_antiheal_line(antiheal: dict | None,
             f"({first.get('champ') or '?'}), {tail}.")
 
 
-def _verdict_teamfight_line(teamfights: list,
-                            team_series: dict | None = None) -> str | None:
+def _verdict_teamfight_line(teamfights: list, team_series: dict | None = None,
+                            *, data_start: int = 0) -> str | None:
     """Teamfight-Bilanz mit Kipp-Punkt (nur bei entschiedener Uebermacht).
 
     Der Kipp-Punkt kommt aus `teamfight_tipping_minute` - derselben Quelle, die
@@ -755,7 +837,7 @@ def _verdict_teamfight_line(teamfights: list,
         line = f"{lost} von {decisive} großen Teamfights verloren"
     else:
         line = f"{won} von {decisive} großen Teamfights gewonnen"
-    dec = tipping_decision(teamfights, team_series)
+    dec = tipping_decision(teamfights, team_series, data_start=data_start)
     if dec and dec["kind"] == "tip":
         line += f"; Kipp-Punkt bei Min {dec['minute']:.0f}"
     elif dec and dec["kind"] == "swing":
@@ -767,8 +849,8 @@ def _verdict_teamfight_line(teamfights: list,
     return line + "."
 
 
-def _verdict_oneside_line(teamfights: list,
-                          team_series: dict | None = None) -> str | None:
+def _verdict_oneside_line(teamfights: list, team_series: dict | None = None,
+                          *, data_start: int = 0) -> str | None:
     """Ersatz-Aussage fuer Spiele OHNE Kipp-Punkt: ab wann war es einseitig?
 
     Greift in zwei Faellen:
@@ -782,14 +864,19 @@ def _verdict_oneside_line(teamfights: list,
        erzaehlt (s. dort).
 
     In beiden Faellen zusaetzlich noetig: das Spiel war dauerhaft einseitig
-    (`oneside_minute`)."""
-    dec = tipping_decision(teamfights or [], team_series)
+    (`oneside_minute`).
+
+    `data_start` (Aufzeichnungs-Guard): war der Moment schon die erste gemessene
+    Minute, nennt die Zeile den Aufzeichnungsbeginn statt eine Minute zu
+    behaupten, ab der angeblich etwas begann - vor ihr wurde nichts gemessen."""
+    ds = _guard_start(data_start)
+    dec = tipping_decision(teamfights or [], team_series, data_start=ds)
     if dec is not None:
         if dec["kind"] != "oneside":
             return None                      # tip/swing tragen die Aussage schon
-    elif _tipping_candidate(teamfights or [], team_series) is not None:
+    elif _tipping_candidate(teamfights or [], team_series, ds) is not None:
         return None
-    one = oneside_minute(team_series)
+    one = oneside_minute(team_series, data_start=ds)
     if not one:
         return None
     where = "vorn" if one["ahead"] else "hinten"
@@ -799,8 +886,11 @@ def _verdict_oneside_line(teamfights: list,
     # einer haette sein koennen.
     decisive = _teamfight_balance(teamfights or [])[2]
     head = "Kein Kipp-Punkt — durchgehend" if decisive else "Durchgehend"
-    return (f"{head} {where} ab Min {one['minute']:.0f} "
-            f"({label}-{what} nie wieder unter {_fmt_int(one['thr'])}).")
+    tail = f"({label}-{what} nie wieder unter {_fmt_int(one['thr'])})."
+    if one.get("since_start"):
+        return (f"{head} {where}, seit Aufzeichnungsbeginn Min "
+                f"{ds:.0f} {tail}")
+    return f"{head} {where} ab Min {one['minute']:.0f} {tail}"
 
 
 def _elite_key(e: dict) -> str:
@@ -915,7 +1005,7 @@ def verdict(me_player: dict, *, win=None, outcome_known: bool = True,
             objectives: dict | None = None, teamfights: list | None = None,
             impact: dict | None = None, scoreboard: list | None = None,
             has_damage: bool = True, team_series: dict | None = None,
-            antiheal: dict | None = None) -> dict:
+            antiheal: dict | None = None, data_start: int = 0) -> dict:
     """Regelbasiertes Auto-Verdikt als Liste kurzer, eigenstaendiger Befund-Zeilen
     (wichtigster zuerst), gerendert je auf eigener Zeile.
 
@@ -941,7 +1031,12 @@ def verdict(me_player: dict, *, win=None, outcome_known: bool = True,
     `team_series`, key-frei) traegt die Kipp-Punkt-Pruefung: ohne sie gibt es
     keinen Kipp-Punkt und keine Einseitig-Zeile. `antiheal` (nur der
     Timeline-Pfad hat die Heilungs-Endwerte) traegt den Antiheal-Befund.
-    Rueckgabe {lines: [...]}."""
+    `data_start` (Aufzeichnungs-Guard, Report-Feld `data_start`) haelt die
+    Verlaufs-Aussagen von den aufgefuellten Minuten eines spaet gestarteten
+    Live-Captures fern; die Phasen-Zeilen brauchen ihn nicht, weil die
+    Phasen-Deltas des Spielers ihn schon eingebaut haben (nicht aufgezeichnete
+    Phasen tragen dort None und fallen aus jeder Zeile). Rueckgabe
+    {lines: [...]}."""
     teamfights = teamfights or []
     me_pid = me_player.get("pid")
     deficit, contribution, role_diff = (None, None, None)
@@ -965,11 +1060,12 @@ def verdict(me_player: dict, *, win=None, outcome_known: bool = True,
     head = [
         _verdict_outcome_line(win, outcome_known, objectives),
         # Fight-Bilanz + Kipp-Punkt: die eine Zeile, die das Spiel einordnet.
-        _verdict_teamfight_line(teamfights, team_series),
+        _verdict_teamfight_line(teamfights, team_series,
+                                data_start=data_start),
     ]
     team_block = [
         # Ersatz fuer den Kipp-Punkt-Teil bei einseitigen Spielen (Stomp).
-        _verdict_oneside_line(teamfights, team_series),
+        _verdict_oneside_line(teamfights, team_series, data_start=data_start),
         # WARUM liefen die Fights nicht? (ersetzt den tautologischen Faktor)
         _verdict_teamfight_reason_line(teamfights),
         role_diff,
@@ -1018,16 +1114,30 @@ def _ts_ms(ev) -> float:
 
 # --- Sektion 1: Schaden-Vergleich je Phase (nur has_damage) -----------------
 
-def phase_gain_pairs(me_seq: list, opp_seq: list | None, n: int) -> list:
+def phase_gain_pairs(me_seq: list, opp_seq: list | None, n: int,
+                     *, data_start: int = 0) -> list:
     """Phasen-Zuwaechse einer kumulativen Serie (z. B. Schaden) me vs. opp.
 
     Fuer jede PHASE (Early/Mid/Late) der Zuwachs `seq[ende]-seq[start]` (ueber
     `_cum_gain`, gleiche Fensterlogik wie die Delta-Engine). `opp_seq` None/leer
     -> nur eigene Werte. Rueckgabe je Phase {key, label, me, opp, delta}. Basis
     fuer den Early/Mid/End-Schaden-Vergleich (Ich vs. Gegenpart UND Team vs.
-    Team)."""
+    Team).
+
+    `data_start` (Aufzeichnungs-Guard, s. `phase_window`): eine Phase ganz vor
+    der ersten gemessenen Minute liefert `{..., me: None, opp: None, delta: None,
+    covered: False}` - der Renderer schreibt dort "nicht aufgezeichnet" statt
+    eines erfundenen Balkens. Bei `data_start=0` ist die Ausgabe identisch zu
+    frueher (kein `covered`-Schluessel)."""
+    ds = clamp_data_start(data_start, n)
     out = []
     for key, label, a, b in PHASES:
+        win = phase_window(a, b, n, ds)
+        if win is None:
+            out.append({"key": key, "label": label, "me": None, "opp": None,
+                        "delta": None, "covered": False})
+            continue
+        a, b = win
         mine = _cum_gain(me_seq, a, b, n)
         if not opp_seq:
             out.append({"key": key, "label": label, "me": mine, "opp": None,
@@ -1154,7 +1264,8 @@ def impact_phase_rows(ser: dict, pid: int, opp: int | None) -> list | None:
     Rueckgabe: Zeilenliste {key, label, me, opp, delta} (early/mid/late) oder
     **None**, wenn keine der drei Serien Daten hergibt (key-freier Pfad ohne
     Anreicherung -> Kachel zeigt nur die Gesamt-Balken). Ohne Gegenpart-Serie
-    bleiben `opp`/`delta` None."""
+    bleiben `opp`/`delta` None. Der Aufzeichnungs-Guard (`ser["data_start"]`)
+    laeuft ueber `phase_gain_pairs` mit."""
     players = ser["players"]
     n = ser["n_frames"]
     me_seq = impact_combined_series(players.get(pid, {}))
@@ -1162,7 +1273,8 @@ def impact_phase_rows(ser: dict, pid: int, opp: int | None) -> list | None:
     opp_seq = impact_combined_series(op)
     if not (me_seq or opp_seq):
         return None
-    return phase_gain_pairs(me_seq, opp_seq, n)
+    return phase_gain_pairs(me_seq, opp_seq, n,
+                            data_start=ser.get("data_start", 0))
 
 
 def impact_quotes(scores: dict, pairs: list) -> dict:
@@ -1552,17 +1664,21 @@ def _lead_holds(diff: list, s: int, start: int, thr: float) -> bool:
     return s * diff[-1] >= thr
 
 
-def _hold_start(diff: list, s: int, thr: float) -> int | None:
+def _hold_start(diff: list, s: int, thr: float, ds: int = 0) -> int | None:
     """Fruehester Frame-Index, ab dem der Vorsprung in Richtung `s` die Schwelle
     erreicht und sie bis Spielende HAELT - der Moment, in dem das Spiel dauerhaft
-    entschieden war. None, wenn es nie dauerhaft entschieden war."""
-    for j in range(len(diff)):
+    entschieden war. None, wenn es nie dauerhaft entschieden war.
+
+    `ds` (Aufzeichnungs-Guard): vor der ersten gemessenen Minute wird nicht
+    gesucht - "ab Min 3 dauerhaft entschieden" waere bei einem Capture ab Min 12
+    eine Aussage ueber aufgefuellte Frames."""
+    for j in range(max(0, ds), len(diff)):
         if s * diff[j] >= thr and _lead_holds(diff, s, j, thr):
             return j
     return None
 
 
-def _tip_basis(team_series: dict | None):
+def _tip_basis(team_series: dict | None, ds: int = 0):
     """(diff, thr, richtung, hold_start, metrik) der ENTSCHEIDENDEN Team-Serie.
 
     Bevorzugt das Team-Item-Gold ("spent"). Ist dessen Differenz am Spielende
@@ -1571,26 +1687,30 @@ def _tip_basis(team_series: dict | None):
     EUW1_7928614824 endete bei -250 Gold, obwohl das Spiel klar gekippt war
     (Kill-Differenz +11 -> -12). Beide Serien liegen key-frei in allen
     Datenpfaden vor. Rueckgabe None, wenn KEINE Serie ein dauerhaft fuehrendes
-    Team zeigt - dann gibt es weder Kipp-Punkt noch Einseitig-Aussage."""
+    Team zeigt - dann gibt es weder Kipp-Punkt noch Einseitig-Aussage.
+
+    `ds` (Aufzeichnungs-Guard): gezaehlt und gesucht wird nur im GEMESSENEN Teil
+    der Serie - ein Capture ab Min 12 muss danach immer noch lang genug sein, um
+    'dauerhaft' zu belegen."""
     if not team_series:
         return None
     for metric, thr in (("spent", TIP_OPEN_GOLD), ("kills", TIP_OPEN_KILLS)):
         diff = _team_diff(team_series.get(metric))
         # Kurze Serien (Remake/Live-Capture-Schnipsel) tragen keine Aussage
         # ueber 'dauerhaft' - dieselbe Grenze wie fuer den Kipp-Punkt selbst.
-        if len(diff) <= TIP_MIN_MINUTE:
+        if len(diff) - max(0, ds) <= TIP_MIN_MINUTE:
             continue
         s = _final_lead(diff, thr)
         if s is None:
             continue
-        hold = _hold_start(diff, s, thr)
+        hold = _hold_start(diff, s, thr, ds)
         if hold is not None:
             return (diff, thr, s, hold, metric)
     return None
 
 
-def _tipping_candidate(teamfights: list,
-                       team_series: dict | None) -> float | None:
+def _tipping_candidate(teamfights: list, team_series: dict | None,
+                       ds: int = 0) -> float | None:
     """Die REINE Kipp-Punkt-Regel (s. Block oben): frueheste Minute eines
     entschiedenen Fights, der das Spiel nachweislich gekippt hat - sonst None.
 
@@ -1602,8 +1722,10 @@ def _tipping_candidate(teamfights: list,
         kippte das Spiel woanders) und
     (3) es unmittelbar vor M noch offen war bzw. der am Ende Unterlegene vorn lag.
     Ohne Team-Serien gibt es keinen belastbaren Kipp-Punkt (lieber keine Aussage
-    als eine erfundene)."""
-    basis = _tip_basis(team_series)
+    als eine erfundene). `ds` (Aufzeichnungs-Guard): Fights vor der ersten
+    gemessenen Minute koennen kein Kandidat sein - die Lage 'unmittelbar davor'
+    waere dort aufgefuellt."""
+    basis = _tip_basis(team_series, ds)
     if basis is None:
         return None
     diff, thr, s, hold, _metric = basis
@@ -1611,7 +1733,7 @@ def _tipping_candidate(teamfights: list,
     minutes = sorted(f["minute"] for f in (teamfights or [])
                      if f.get("result") in ("gewonnen", "verloren"))
     for m in minutes:
-        if m < TIP_MIN_MINUTE:
+        if m < TIP_MIN_MINUTE or m < ds:
             continue
         i = max(0, min(int(m), n - 1))
         if i > hold or (hold - i) > TIP_CONFIRM_MIN:
@@ -1621,7 +1743,8 @@ def _tipping_candidate(teamfights: list,
     return None
 
 
-def _lead_flips_after(team_series: dict | None, minute: float) -> tuple:
+def _lead_flips_after(team_series: dict | None, minute: float,
+                      ds: int = 0) -> tuple:
     """(Anzahl Fuehrungswechsel nach `minute`, Index des letzten Wechsels).
 
     Datenbasis ist IMMER das Team-Item-Gold ("spent") - die Serie, die abbildet,
@@ -1630,13 +1753,17 @@ def _lead_flips_after(team_series: dict | None, minute: float) -> tuple:
     etablierten Fuehrung zur entgegengesetzten (Zwischenwerte innerhalb der
     Schwelle aendern nichts). Der ERSTE Fuehrungsaufbau aus dem neutralen
     Zustand heraus zaehlt nicht als Wechsel. Ohne Gold-Serie -> (0, None):
-    keine Grundlage, den Kandidaten zu entwerten."""
+    keine Grundlage, den Kandidaten zu entwerten. `ds` (Aufzeichnungs-Guard):
+    aufgefuellte Frames zaehlen nicht mit - die "Fuehrung" dort ist eine Kopie
+    der ersten gemessenen Minute."""
     diff = _team_diff((team_series or {}).get("spent"))
     if not diff:
         return (0, None)
     start = int(minute)
     lead, flips, last = 0, 0, None
     for i, d in enumerate(diff):
+        if i < ds:
+            continue
         s = 1 if d >= TIP_FLIP_GOLD else (-1 if d <= -TIP_FLIP_GOLD else 0)
         if s == 0 or s == lead:
             continue
@@ -1666,7 +1793,7 @@ def _decisive_swing_minute(teamfights: list, after_index) -> float | None:
     return decisive[-1]
 
 
-def _underdog_ever_led(basis, minute: float) -> bool:
+def _underdog_ever_led(basis, minute: float, ds: int = 0) -> bool:
     """Hat das am Ende UNTERLEGENE Team vor `minute` je selbst gefuehrt?
 
     `basis` ist das Tupel aus `_tip_basis` (diff, thr, richtung, hold, metrik);
@@ -1679,15 +1806,20 @@ def _underdog_ever_led(basis, minute: float) -> bool:
     `_lead_flips_after` - unter 3.000 Gold schwankt die Differenz, ohne dass
     jemand wirklich vorn liegt. Ein 2.000er Zwischenhoch fuer eine Minute ist
     keine Fuehrung, die ein Spiel spaeter "kippen" koennte. Bei der
-    Kill-Differenz als Basis bleibt es bei deren eigener Schwelle."""
+    Kill-Differenz als Basis bleibt es bei deren eigener Schwelle.
+
+    `ds` (Aufzeichnungs-Guard): geprueft wird nur der gemessene Teil. Wurde vor
+    `ds` gar nicht aufgezeichnet, ist "hat nie gefuehrt" schlicht unbekannt - und
+    die Kipp-Aussage faellt (ueber `tipping_decision`) auf 'durchgehend' zurueck,
+    also auf die vorsichtigere Formulierung."""
     diff, thr, s, _hold, metric = basis
     lead_thr = TIP_FLIP_GOLD if metric == "spent" else thr
     end = max(0, min(int(minute), len(diff)))
-    return any(-s * d >= lead_thr for d in diff[:end])
+    return any(-s * d >= lead_thr for d in diff[max(0, ds):end])
 
 
-def tipping_decision(teamfights: list,
-                     team_series: dict | None = None) -> dict | None:
+def tipping_decision(teamfights: list, team_series: dict | None = None,
+                     *, data_start: int = 0) -> dict | None:
     """Kipp-Punkt-Befund des Spiels: {kind, minute, flips} oder None.
 
     EINE Quelle der Wahrheit fuer das `tip`-Flag der Fight-Karten UND die
@@ -1712,17 +1844,21 @@ def tipping_decision(teamfights: list,
 
     `kind="tip"` = belastbarer Kipp-Punkt, `kind="swing"` = mehrere
     Fuehrungswechsel, `kind="oneside"` = durchgehend einseitig (kein Kippen).
-    None = kein Befund (u. a. zu duenne Fight-Bilanz)."""
+    None = kein Befund (u. a. zu duenne Fight-Bilanz).
+
+    `data_start` (Aufzeichnungs-Guard): aufgefuellte Minuten eines spaet
+    gestarteten Live-Captures zaehlen in KEINEM der drei Schritte mit."""
     won, lost, decisive = _teamfight_balance(teamfights or [])
     if decisive < TEAMFIGHT_MIN or won == lost:
         return None
-    cand = _tipping_candidate(teamfights or [], team_series)
+    ds = _guard_start(data_start)
+    cand = _tipping_candidate(teamfights or [], team_series, ds)
     if cand is None:
         return None
-    flips, last = _lead_flips_after(team_series, cand)
+    flips, last = _lead_flips_after(team_series, cand, ds)
     if flips < TIP_FLIP_MIN:
-        basis = _tip_basis(team_series)
-        if basis is not None and not _underdog_ever_led(basis, cand):
+        basis = _tip_basis(team_series, ds)
+        if basis is not None and not _underdog_ever_led(basis, cand, ds):
             return {"kind": "oneside", "minute": cand, "flips": flips}
         return {"kind": "tip", "minute": cand, "flips": flips}
     swing = _decisive_swing_minute(teamfights or [], last)
@@ -1731,19 +1867,20 @@ def tipping_decision(teamfights: list,
     return {"kind": "swing", "minute": swing, "flips": flips}
 
 
-def teamfight_tipping_minute(teamfights: list,
-                             team_series: dict | None = None) -> float | None:
+def teamfight_tipping_minute(teamfights: list, team_series: dict | None = None,
+                             *, data_start: int = 0) -> float | None:
     """Minute des Kipp-Punkt-Fights - nur bei belastbarem Kipp-Punkt.
 
     Duenne Huelle um `tipping_decision`: liefert die Minute ausschliesslich fuer
     `kind="tip"`. Ein Spiel mit mehreren Fuehrungswechseln (`kind="swing"`)
     bekommt bewusst KEINE Kipp-Punkt-Markierung auf der Fight-Karte - dort war
     nichts der Kipp-Punkt."""
-    dec = tipping_decision(teamfights, team_series)
+    dec = tipping_decision(teamfights, team_series, data_start=data_start)
     return dec["minute"] if dec and dec["kind"] == "tip" else None
 
 
-def oneside_minute(team_series: dict | None) -> dict | None:
+def oneside_minute(team_series: dict | None,
+                   *, data_start: int = 0) -> dict | None:
     """Minute, ab der das Spiel DAUERHAFT entschieden war - sonst None.
 
     Das ist `_hold_start` der entscheidenden Serie: die frueheste Minute, ab der
@@ -1751,12 +1888,21 @@ def oneside_minute(team_series: dict | None) -> dict | None:
     erreicht und sie bis Spielende haelt. Ersatz-Aussage fuer Spiele ohne
     Kipp-Punkt ('durchgehend hinten ab Min X'). Rueckgabe {minute, ahead, thr,
     metric}; `ahead` True = das EIGENE Team lag durchgehend vorn. Frame-Index ==
-    Minute (Frames liegen minuetlich vor, wie in der ganzen Delta-Engine)."""
-    basis = _tip_basis(team_series)
+    Minute (Frames liegen minuetlich vor, wie in der ganzen Delta-Engine).
+
+    `data_start` (Aufzeichnungs-Guard): gesucht wird erst ab der ersten
+    gemessenen Minute. Faellt der Moment mit ihr zusammen, ist ueber das Davor
+    NICHTS bekannt - das Feld `since_start` markiert das, damit die Verdikt-Zeile
+    "seit Aufzeichnungsbeginn" sagt statt "ab Min X" zu behaupten."""
+    ds = _guard_start(data_start)
+    basis = _tip_basis(team_series, ds)
     if basis is None:
         return None
     _diff, thr, s, hold, metric = basis
-    return {"minute": float(hold), "ahead": s > 0, "thr": thr, "metric": metric}
+    out = {"minute": float(hold), "ahead": s > 0, "thr": thr, "metric": metric}
+    if ds > 0 and hold <= ds:
+        out["since_start"] = True
+    return out
 
 
 # --- Warum gingen die Fights verloren? (key-frei, 2026-07-26b) --------------
@@ -2069,7 +2215,7 @@ def _baron_activity(events: list, n: int, my_team) -> list:
 
 def winprob_series(team_series: dict | None, *, elites: list | None = None,
                    buildings: list | None = None, my_team: int | None = None,
-                   weights: dict | None = None) -> list:
+                   weights: dict | None = None, data_start: int = 0) -> list:
     """Heuristische Gewinnchance des EIGENEN Teams je Minute (Liste 0..1).
 
     Datenbasis sind ausschliesslich key-freie Team-Signale: `team_series`
@@ -2083,6 +2229,12 @@ def winprob_series(team_series: dict | None, *, elites: list | None = None,
     Serienlaenge folgt der laengsten vorliegenden Differenz-Serie; kuerzere
     werden mit ihrem letzten Wert fortgeschrieben. Serien unter
     WINPROB_MIN_FRAMES Frames ergeben **[]** (keine Kurve statt einer erfundenen).
+
+    `data_start` (Aufzeichnungs-Guard): Minuten vor der ersten gemessenen sind
+    **None** statt einer Zahl - die Team-Differenzen dort stammen aus der
+    Auffuellung, eine Gewinnchance daraus waere erfunden. Die Liste behaelt ihre
+    Laenge (Index == Minute), Konsumenten muessen None ueberspringen. Bei
+    `data_start=0` ist die Kurve identisch zu frueher.
 
     Bewusst KEIN trainiertes Modell - der Report weist das im Chart-Untertitel
     auch so aus."""
@@ -2115,8 +2267,13 @@ def winprob_series(team_series: dict | None, *, elites: list | None = None,
     towers = _cum_event_diff(buildings or [], n, my_team, _tower_sign)
     baron = _baron_activity(elites, n, my_team)
 
+    ds = clamp_data_start(data_start, n)
     out = []
     for i in range(n):
+        if i < ds:
+            # Aufgefuellter Frame: kein gemessenes Signal -> keine Zahl.
+            out.append(None)
+            continue
         gnorm = _diff_at(gold, i) / (WINPROB_GOLD_BASE
                                      + i * WINPROB_GOLD_PER_MIN)
         z = (w["gold"] * gnorm

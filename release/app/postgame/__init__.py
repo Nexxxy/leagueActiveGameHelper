@@ -18,8 +18,14 @@ from core.config import Config
 # `capture` wird hier nicht direkt benutzt, aber bewusst eager mitgeladen: der
 # Release-Smoketest importiert `app.postgame.capture` und wuerde ein fehlendes
 # Submodul im Paket sonst erst zur Laufzeit bemerken.
-from . import (analysis, build_replay, capture, enrich, fetch,  # noqa: F401
-               live_series, render, series, trend)
+from . import (analysis, build_replay, capture, enrich, fairness,  # noqa: F401
+               fetch, live_series, render, series, trend)
+
+# Version des Report-Generators - die EINZIGE Quelle dafuer.
+# Bei JEDER inhaltlichen Aenderung am Report-Inhalt oder -Layout um 1 erhoehen:
+# die Match-History vergleicht diesen Wert mit dem im Report gestempelten und
+# bietet fuer aeltere Reports den Fix-Button an (neu generieren).
+REPORT_VERSION: int = 3
 
 # Anzeige-Namen der relevanten Queues (SR 5v5).
 _QUEUE_NAME = {420: "Ranked Solo/Duo", 440: "Ranked Flex",
@@ -194,9 +200,13 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
                     "opp": level_ts.get(200 if my_team == 100 else 100, [])}
 
     # Heuristische Gewinnchance je Minute (key-frei, s. analysis.winprob_series).
+    # `data_start` ist im Timeline-Pfad immer 0 (die Timeline beginnt bei
+    # Spielbeginn) - der Guard laeuft trotzdem ueber dasselbe Feld wie im
+    # Dump-Pfad, damit es nur EINEN Weg gibt.
     winprob = analysis.winprob_series(
         tvt, elites=ser["events"]["elites"],
-        buildings=ser["events"]["buildings"], my_team=my_team)
+        buildings=ser["events"]["buildings"], my_team=my_team,
+        data_start=ser.get("data_start", 0))
 
     # --- Objektive/Elite + Gebaeude ----------------------------------------
     objectives = _objective_summary(ser, my_team, pid_team)
@@ -245,7 +255,8 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
         me_player, win=me_player["win"], outcome_known=True,
         objectives=objectives, teamfights=extra.get("teamfights"),
         impact=extra.get("impact"), scoreboard=scoreboard, has_damage=True,
-        team_series=tvt, antiheal=antiheal)
+        team_series=tvt, antiheal=antiheal,
+        data_start=ser.get("data_start", 0))
 
     # Spiel-Ende-Datum (fuer den Trend-Record): gameEndTimestamp, sonst
     # gameCreation + Dauer als Naeherung.
@@ -253,13 +264,27 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
         (info.get("gameCreation", 0) or 0)
         + (info.get("gameDuration", 0) or 0) * 1000) or None
 
+    # Remake: keine Fairness-Sektion (der Guard sitzt VOR jedem Call) und in der
+    # Match-History ein neutraler Chip statt Win/Loss (s. fairness.is_remake).
+    remake = fairness.is_remake(info)
+    try:
+        fair = fairness.build_fairness(cfg, match, my_team, me_pid,
+                                       match_id=match_id, log=log)
+    except Exception as exc:   # noqa: BLE001 - Fairness-Sektion ist optional
+        log(f"[postgame] Fairness-Sektion uebersprungen ({exc!r}).")
+        fair = None
+
     report = {
         "match_id": match_id,
+        # Stand des Report-Generators, mit dem dieser Report gebaut wurde -
+        # Grundlage des Fix-Buttons in der Match-History (s. REPORT_VERSION).
+        "report_version": REPORT_VERSION,
         "patch": patch,
         "source": "timeline",     # Datenquelle: Match-V5-Timeline (Key-Pfad)
         "has_damage": True,        # Schaden-an-Champions liegt vor (voller Report)
         "enriched": True,          # Schaden + Impact vorhanden (Renderer/Redesign)
         "outcome_known": True,     # Sieg/Niederlage bekannt (Trend-Record)
+        "remake": remake,          # Remake (Early Surrender < 5 min), s. o.
         "game_end": game_end,      # Spiel-Ende-Datum (ms) fuer den Trend-Record
         "impact_raw": impact_raw,
         "queue": _QUEUE_NAME.get(info.get("queueId"), str(info.get("queueId"))),
@@ -284,6 +309,8 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
         "verdict": verdict,
         **extra,
     }
+    if fair:
+        report["fairness"] = fair
     _attach_trend_line(cfg, report, log=log)
     return report
 
@@ -470,9 +497,10 @@ def _role_dmg_pair(ser: dict, ranked_names: dict, cmap: dict, my_team: int,
 
     Loest den pid des eigenen Teams mit `role` und dessen counterpart auf und
     baut daraus die Phasen-Zuwaechse (`phase_gain_pairs`, dieselbe Logik wie das
-    Me-/Team-Paar). Rueckgabe {role, me_champ, opp_champ, rows} oder None, wenn
-    der eigene Rolleninhaber ODER sein Gegenpart fehlt (Renderer laesst das Paar
-    dann sauber weg)."""
+    Me-/Team-Paar, inklusive Aufzeichnungs-Guard ueber `ser["data_start"]`).
+    Rueckgabe {role, me_champ, opp_champ, rows} oder None, wenn der eigene
+    Rolleninhaber ODER sein Gegenpart fehlt (Renderer laesst das Paar dann sauber
+    weg)."""
     me_pid = next((pid for pid, info in ranked_names.items()
                    if info["team"] == my_team and info["role"] == role), None)
     if me_pid is None:
@@ -484,7 +512,8 @@ def _role_dmg_pair(ser: dict, ranked_names: dict, cmap: dict, my_team: int,
     opp_dmg = ser["players"].get(opp_pid, {}).get("dmg", [])
     return {"role": role, "me_champ": ranked_names[me_pid]["champ"],
             "opp_champ": ranked_names[opp_pid]["champ"],
-            "rows": analysis.phase_gain_pairs(me_dmg, opp_dmg, n)}
+            "rows": analysis.phase_gain_pairs(
+                me_dmg, opp_dmg, n, data_start=ser.get("data_start", 0))}
 
 
 def _duo_heal_totals(impact_raw: dict, me_pid, opp_pid) -> dict | None:
@@ -517,6 +546,10 @@ def _attach_phase4b(*, team_players: list, ser: dict, cmap: dict,
     n = ser["n_frames"]
     kills = ser["events"]["kills"]
     elites = ser["events"]["elites"]
+    # Erste GEMESSENE Minute (spaet gestartetes Live-Capture; Timeline-Pfad und
+    # alte Serien ohne das Feld -> 0). Sie haelt Phasen-Zuwaechse und
+    # Kipp-Punkt von den aufgefuellten Minuten fern (s. analysis.phase_window).
+    ds = ser.get("data_start", 0)
     extra: dict = {}
 
     # --- Sektion 1: Schaden je Phase (nur mit Schaden-Daten) ----------------
@@ -546,10 +579,11 @@ def _attach_phase4b(*, team_players: list, ser: dict, cmap: dict,
             if pair:
                 role_pairs.append(pair)
         phases = {
-            "duo": analysis.phase_gain_pairs(me_seq, opp_seq, n),
+            "duo": analysis.phase_gain_pairs(me_seq, opp_seq, n, data_start=ds),
             "role_pairs": role_pairs,
             "team": analysis.phase_gain_pairs(tvt.get("dmg", {}).get("me", []),
-                                              tvt.get("dmg", {}).get("opp", []), n),
+                                              tvt.get("dmg", {}).get("opp", []),
+                                              n, data_start=ds),
         }
         # Nur im UTILITY-Fall kommen Schluessel dazu - sonst bleibt das Payload
         # byte-identisch zu vorher (Abwaertskompatibilitaet der Renderer).
@@ -593,7 +627,7 @@ def _attach_phase4b(*, team_players: list, ser: dict, cmap: dict,
     clusters = analysis.detect_teamfights(kills, pid_team, my_team)
     analysis.teamfight_reasons(clusters, kills, pid_team, my_team,
                                elites=elites, team_series=tvt)
-    tip_min = analysis.teamfight_tipping_minute(clusters, tvt)
+    tip_min = analysis.teamfight_tipping_minute(clusters, tvt, data_start=ds)
     extra["teamfights"] = analysis.teamfight_cards(
         clusters, ranked_names, my_team, tip_minute=tip_min)
 
@@ -722,11 +756,20 @@ def _patch_vision_deltas(deltas: list, ser: dict, pid: int, opp) -> None:
     `analysis.phase_deltas` leitet Vision aus Ward-*Events* ab; die hat der Dump
     nicht (nur die kumulative wardScore-Serie je Spieler). Darum wird die
     Vision-Metrik jeder Phase hier nachtraeglich aus der wardScore-Serie gebildet
-    (gleiche Phasenfenster wie die Delta-Engine). Gold/CS bleiben unberuehrt."""
+    (gleiche Phasenfenster wie die Delta-Engine). Gold/CS bleiben unberuehrt.
+
+    Der Aufzeichnungs-Guard gilt hier genauso: eine Phase, die `phase_deltas`
+    als nicht aufgezeichnet markiert hat (`covered=False`), bleibt leer - sonst
+    schriebe dieser Patch die erfundenen Werte wieder hinein."""
     n = ser["n_frames"]
+    ds = analysis.clamp_data_start(ser.get("data_start", 0), n)
     me_v = ser["players"].get(pid, {}).get("vision", [])
     op_v = ser["players"].get(opp, {}).get("vision", []) if opp is not None else []
     for ph, (_key, _lab, a, b) in zip(deltas, analysis.PHASES):
+        win = analysis.phase_window(a, b, n, ds)
+        if win is None:
+            continue
+        a, b = win
         mine = analysis._cum_gain(me_v, a, b, n)
         if opp is None:
             ph["metrics"]["vision"] = {"me": mine, "opp": None, "delta": None}
@@ -977,7 +1020,8 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
     # traegt Team-Gold/Kills/Level und die Objective-Events, s. live_series).
     winprob = analysis.winprob_series(
         tvt, elites=ser["events"]["elites"],
-        buildings=ser["events"]["buildings"], my_team=my_team)
+        buildings=ser["events"]["buildings"], my_team=my_team,
+        data_start=ser.get("data_start", 0))
 
     objectives = _objective_summary(ser, my_team, pid_team)
     ranked_names = {p["pid"]: {"champ": p["champ"], "role": p["role"],
@@ -1004,7 +1048,7 @@ def _build_report_core(cfg: Config, *, pid_map: dict, ser: dict, finals: dict,
         me_player, win=False, outcome_known=False,
         objectives=objectives, teamfights=extra.get("teamfights"),
         impact=extra.get("impact"), scoreboard=scoreboard, has_damage=False,
-        team_series=tvt)
+        team_series=tvt, data_start=ser.get("data_start", 0))
 
     # --- Zustandsbewusster Schaden-Disclaimer (Bugfix 2026-07-24) -----------
     # Der key-freie Report unterscheidet vier Zustaende, damit der Renderer einen

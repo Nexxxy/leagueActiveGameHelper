@@ -44,6 +44,62 @@ class Weights:
     # T4-Heuristik-Gewichten (partner_buff_*), damit Ablation unabhaengig moeglich ist.
     partner_kb_cap: float = 0.2       # Cap des by_partner-Schubs (+/-)
     partner_kb_scale: float = 0.8     # Skalierung des by_partner-Schubs
+    # KB-datengetriebener Heal-Schub (by_heal in builds.yaml): wirkt NUR, wenn das
+    # Gegnerteam >= HEAL_HEAVY_MIN Champions der kuratierten Heiler-Liste hat
+    # (`rec_context._enemy_heal_bucket`) und die Kombi `rich` ist. Mechanik 1:1 wie
+    # by_threat (Shrinkage gegen base_win_rate, RANK_MIN_N-Zellgate, Cap).
+    #
+    # `heal_factor` ist ein MODUS-Schalter, kein reiner Skalar (Muster
+    # `next_after_factor`): 0.0 = die Schicht ist KOMPLETT aus - es wird nicht
+    # einmal die Zelle geladen, es gibt keinen Schub UND keinen Begruendungstext.
+    # >0.0 skaliert den Schub wie `threat_scale`.
+    #
+    # Default 0.0: die Zellen kommen mit der Dimension zwar immer in die KB
+    # (Datenlage), die Wirkung schaltet aber erst ein bestandenes Backtest-Gate
+    # frei (Pool-Mittel Hit@3 muss steigen, kein Pool-Champion darf > 1 pp
+    # fallen) - dieselbe Beweislast wie bei next_after_factor. Solange hier 0
+    # steht, ist der Nachweis NICHT erbracht.
+    heal_factor: float = 0.0
+    heal_cap: float = 0.2             # Cap des by_heal-Schubs (+/-)
+    # KB-datengetriebener Keystone-Schub (by_keystone in builds.yaml): wirkt NUR,
+    # wenn die EIGENE Hauptrune bekannt ist (Live-API `allPlayers[].runes.keystone`
+    # bzw. Match-Perks im Backtest), die Kombi `rich` ist und die Zelle dieser
+    # Perk-ID belegt ist. Mechanik 1:1 wie by_threat/by_heal (Shrinkage gegen
+    # base_win_rate, RANK_MIN_N-Zellgate, Cap).
+    #
+    # Der Wert der Dimension liegt bei den NICHT-Mehrheits-Runen: wo eine Rune
+    # dominiert, ist ihre Zelle praktisch das Marginal-Aggregat (Lift ~ 1, also
+    # harmlos); die Minderheits-Runen sind die, deren abweichende Builds das
+    # Marginal wegbuegelt.
+    #
+    # `keystone_factor` ist wie `heal_factor` ein MODUS-Schalter: 0.0 = die
+    # Schicht ist KOMPLETT aus - die Rune wird nicht einmal in den Kontext
+    # uebernommen, es gibt keinen Schub UND keinen Begruendungstext. >0.0
+    # skaliert den Schub wie `threat_scale`.
+    #
+    # Default 0.0: die Zellen sind mit der Dimension immer in der KB (Datenlage),
+    # die Wirkung schaltet erst ein bestandenes Backtest-Gate frei (Pool-Mittel
+    # Hit@3 muss steigen, kein Pool-Champion darf > 1 pp fallen) - dieselbe
+    # Beweislast wie bei next_after_factor/heal_factor.
+    #
+    # Gate-Lauf (Sweep 0.0/0.4/0.8, Pool Gwen/Shyvana/Briar/Yorick JUNGLE):
+    # Der Nachweis ist NICHT erbracht, weil die Rangfolge der Sweep-Werte
+    # zwischen zwei unabhaengigen Patches KIPPT.
+    #   16.15 (3578 Samples): 0.4 Pool-Hit@3 +0,02 pp - das sind exakt EIN
+    #     Treffer mehr (2603 -> 2604) bei bit-identischem Hit@1; 0.8 faellt
+    #     klar ab (-0,37 pp, Gwen -0,65, Shyvana -0,83).
+    #   16.14 (4159 Samples): dieselbe 0.4 faellt (-0,001 pp, Shyvana -0,33) -
+    #     und der auf 16.15 schlechteste Wert 0.8 ist hier der beste (+0,08 pp).
+    # Kein Wert besteht auf BEIDEN Patches. Ein Effekt, dessen Vorzeichen mit
+    # dem Datensatz wechselt, ist Rauschen - und ein Default aus Rauschen waere
+    # genau die Art Schein-Evidenz, die dieses Gate verhindern soll.
+    #
+    # Dass die Schicht technisch feuert, ist unabhaengig davon belegt (echte
+    # Trainings-KB 16.15, Gwen JUNGLE: Conqueror n=705 vs. First Strike n=406,
+    # und die Begruendungstexte/Rankings unterscheiden sich je Rune). Die
+    # Dimension liefert also Datenlage - nur keine gemessene Hit@3-Verbesserung.
+    keystone_factor: float = 0.0
+    keystone_cap: float = 0.2         # Cap des by_keystone-Schubs (+/-)
     # next_after-Bigramm-Lift (T2/T3, plan_roadmap.md "Validierung 2026-07-29"):
     # 0.0 = AUS (Lift bleibt exakt 1.0), 1.0 = voller Lift, Zwischenwerte
     # daempfen ihn (siehe _next_after_lift).
@@ -203,9 +259,84 @@ class Weights:
     # relativ zum Peak: "wie viele schnueren die Boots in DIESEM Slot" ist die
     # Frage, die die Karte beantworten muss.
     boots_slot_min_share: float = 0.05
+    # --- Spielstil-Regler (plan_spielstil.md) ------------------------------
+    # Bewusste NUTZER-Vorgabe, keine Lage-Erkennung (die ist die Stance, s. o.
+    # Befund D): -1.0 = Regler-Stufe 1 "hard defensive/tanky", 0.0 = Stufe 3
+    # neutral (byte-identisch zum Verhalten ohne Regler), +1.0 = Stufe 5
+    # "Glass Cannon". Der Server bildet die fuenf Stufen darauf ab; die Engine
+    # kennt nur den kontinuierlichen Tilt. Kein Hit@3-Gate: der Regler will
+    # gerade vom High-Elo-Kauf abweichen ("Regel schlaegt Metrik"). Wirkung
+    # und Kalibrierkonstanten: engine/rec_style.py.
+    style_tilt: float = 0.0
+    # Staerke der Verschiebung: `faktor = clamp(1 + tilt * achse * style_scale,
+    # style_floor, 2 - style_floor)` auf dem BASISTERM der Pool-Scores
+    # (engine/rec_style.py). Wert 0.95 aus der Kalibrierung an den 16.17-Zahlen
+    # von Gwen JUNGLE (plan_spielstil.md Abschnitt 6) - er ist der einzige
+    # Bereich, in dem alle drei Abnahme-Faelle gleichzeitig halten:
+    #   Stufe 1 (Tilt -1): Riftmaker gewinnt Slot 3 vor Shadowflame und Zhonya
+    #     Slot 4 vor Rabadon (der Floor deckelt die Schadens-Daempfung dort);
+    #   Stufe 2 (Tilt -0.75): Riftmaker gewinnt Slot 3 noch, Slot 4 aber wieder
+    #     Rabadon - erst dadurch unterscheidet sich Stufe 2 von Stufe 1;
+    #   Stufe 5 (Tilt +1): Dusk and Dawn (73 % Pick, Achse 0) bleibt Erstkauf.
+    # Unter ~0.94 kippt Slot 3 auf Stufe 2 zurueck auf Shadowflame, ueber ~0.97
+    # faellt Stufe 2 mit Stufe 1 zusammen.
+    style_scale: float = 0.95
+    # Untergrenze des Faktors (und, gespiegelt, Obergrenze 2 - style_floor).
+    # KEIN Rausch-Filter, sondern eine Reihenfolge-Garantie: bei voller
+    # Daempfung auf 0 laegen alle zurueckgestuften Items gleichauf, und die
+    # gelernte Reihenfolge UNTER ihnen ginge verloren - der Regler soll
+    # umsortieren, nicht Daten loeschen.
+    style_floor: float = 0.2
+    # Boots-Prior des Reglers: |style_tilt| * style_boots_cap, Richtung nach
+    # Vorzeichen (Resistenz-Boots bei Tilt < 0, Offensiv-Boots zum eigenen
+    # Schadenstyp bei Tilt > 0, s. rec_boots._style_boots_prior). Bewusst NICHT
+    # unter `boots_prior_cap` gedeckelt: der Deckel dort schuetzt die
+    # Champion-Statistik vor COMP-Signalen (Janna-Befund, V2-03), hier gibt der
+    # Spieler die Richtung selbst vor. 0.5 ist an der SCHWAECHSTEN Position
+    # kalibriert, die der Regler durchsetzen koennen muss: dem kanonischen
+    # Offensiv-Boot-Fallback (F6), der per Konstruktion 0 % Pick-Rate hat und
+    # trotzdem gegen eine Mehrheitswahl von ~42 % antritt (Realfall Briar
+    # JUNGLE). Alles darunter laesst genau den Fall ins Leere laufen. Die halbe
+    # Stufe 4 (0.75 * 0.5 = 0.375) bleibt dabei unter dieser Schwelle - dort
+    # kippt die Wahl nur, wenn der Abstand der Pick-Raten ohnehin klein ist.
+    style_boots_cap: float = 0.5
+    # Klassen-Overlay auf Stufe 1 (plan_spielstil.md F3): Faktor, mit dem ein
+    # gefilterter Klassen-Pool-Kandidat gegen die Champion-Evidenz antritt.
+    # 0.5 heisst "darf mitspielen, gewinnt aber nur mit deutlichem Abstand" -
+    # die Regel "Champion-Evidenz vor Klassen-Daten" gilt damit weiter ueber den
+    # Faktor statt ueber den harten Ausschluss. 0.0 schaltet das Overlay
+    # komplett ab (Ablation).
+    style_class_factor: float = 0.5
+    # Ab welchem Tilt das Klassen-Overlay ueberhaupt greift (Tilt <= Schwelle).
+    # -1.0 = nur Regler-Stufe 1. Bewusst eine Schwelle und kein Bool: der Sweep
+    # kann so auch "ab Stufe 2" messen, ohne dass es einen zweiten Schalter
+    # braucht.
+    style_class_tilt: float = -1.0
 
 
 DEFAULT_WEIGHTS = Weights()
+
+
+# Abbildung der fuenf Regler-Stufen (Frontend/Server) auf `Weights.style_tilt`.
+# Stufe 3 ist der Default jedes Spiels. Die Mittelstufen sind KALIBRIER-
+# konstanten (plan_spielstil.md, Abschnitt 6): bei linearem +-0.5 reicht der
+# Tilt auf den 16.17-Zahlen von Gwen JUNGLE nicht, um Stufe 2 von Stufe 3 zu
+# unterscheiden (Shadowflame bliebe vor Riftmaker). Mit +-0.75 und
+# `style_scale = 0.95` liegen die drei defensiven Stufen sauber auseinander:
+# Stufe 3 Shadowflame, Stufe 2 Riftmaker dann Rabadon, Stufe 1 Riftmaker dann
+# Zhonya. Hier liegt die EINE Definition, damit Server, Backtest und Tests
+# dieselbe Abbildung nutzen.
+PLAYSTYLE_DEFAULT = 3
+PLAYSTYLE_TILT = {1: -1.0, 2: -0.75, 3: 0.0, 4: 0.75, 5: 1.0}
+
+
+def tilt_for_level(level: int) -> float:
+    """Regler-Stufe (1..5) -> `style_tilt`. Unbekannte Stufe -> neutral (0.0),
+    damit ein kaputter Wert die Empfehlung nie verschiebt."""
+    try:
+        return PLAYSTYLE_TILT.get(int(level), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # Datenhygiene fuer die empirischen Schuebe (by_threat/by_state). Bewusst NICHT

@@ -77,17 +77,27 @@ def _axis_label(v) -> str:
 # schlechter als gar keins (die Flaeche allein sagt schon "hier fehlt was").
 _NODATA_MIN_TEXT_FRAC = 0.15
 
+# Ersatztext fuer eine Phase, die komplett vor dem Aufzeichnungsbeginn liegt
+# (`covered: False` aus analysis.phase_deltas/phase_gain_pairs). Ein 0-Balken
+# stuende dort fuer "nichts passiert" - gemessen wurde aber gar nichts.
+_NODATA_PHASE = "nicht aufgezeichnet"
+
+
+def _na_text(row: dict) -> str:
+    """Ersatztext einer Phasen-Zeile ohne Delta: nicht aufgezeichnet (Guard) oder
+    schlicht kein Gegenpart. Beides landet in `_pb_row`s `pb-na`-Slot."""
+    return _NODATA_PHASE if row.get("covered") is False else "kein Gegenpart"
+
 
 def _clamp_data_start(data_start, n: int) -> int:
     """`data_start` robust auf 0..n begrenzen (fehlendes/kaputtes Feld -> 0).
 
     Alte persistierte Reports tragen das Feld nicht - dann 0, also kein
-    Verhaltensunterschied zum Stand vor dem Feature."""
-    try:
-        ds = int(data_start or 0)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, min(ds, n))
+    Verhaltensunterschied zum Stand vor dem Feature. Duenne Huelle um
+    `analysis.clamp_data_start`: Renderer und Analyse muessen dasselbe Feld
+    identisch auslegen, sonst graut der Chart einen anderen Bereich aus, als die
+    Zahlen darunter aussparen."""
+    return analysis.clamp_data_start(data_start, n)
 
 
 def _nodata_zone(ds: int, x_ds: float, *, pad_l: int, pad_t: int,
@@ -278,7 +288,11 @@ def _winprob_chart(values: list, *, width: int = 1160,
                      f'text-anchor="middle">{m}</text>')
 
     # Kurve und Flaechen erst ab der ersten gemessenen Minute (x bleibt absolut).
-    real = [(i, v) for i, v in enumerate(values) if i >= ds]
+    # `None` = aufgefuellter Frame (analysis.winprob_series rechnet ihn nicht) -
+    # er faellt hier genauso raus wie alles vor `ds`.
+    real = [(i, v) for i, v in enumerate(values) if i >= ds and v is not None]
+    if not real:
+        return ""
     pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in real)
     # Flaechen-Pfad: Kurve hin, auf der 50-%-Linie zurueck.
     area = (f'M {x(ds):.1f},{y_mid:.1f} L '
@@ -353,15 +367,16 @@ def _duo_and_team_charts(report: dict) -> str:
 
 # --- Team-Block -------------------------------------------------------------
 
-def _pb_row(label, delta, scale: float) -> str:
+def _pb_row(label, delta, scale: float, na_text: str = "kein Gegenpart") -> str:
     """Eine Diverging-Balken-Zeile (Label | Track | Delta-Wert), Win/Loss-gefaerbt.
 
     Gemeinsame Basis der Fokus-Phasen-Balken (`_phase_bars`) UND der Impact-
     Phasen-Balken in der Sup-vs-Sup-Kachel (`_impact_phase_bars`) - beide sollen
-    identisch aussehen. `delta` None -> 'kein Gegenpart'."""
+    identisch aussehen. `delta` None -> `na_text` ('kein Gegenpart', bei einer
+    nicht aufgezeichneten Phase `_NODATA_PHASE`)."""
     if delta is None:
         return (f'<div class="pb-row"><span class="pb-lab">{_esc(label)}</span>'
-                f'<span class="pb-na">kein Gegenpart</span></div>')
+                f'<span class="pb-na">{_esc(na_text)}</span></div>')
     w = 50 * abs(delta) / scale
     pos = delta >= 0
     col = "var(--win)" if pos else "var(--loss)"
@@ -374,14 +389,19 @@ def _pb_row(label, delta, scale: float) -> str:
 
 
 def _phase_bars(deltas: list) -> str:
-    """Diverging-Balken je Phase fuer die Rollen-Fokusmetrik (me-opp-Delta)."""
+    """Diverging-Balken je Phase fuer die Rollen-Fokusmetrik (me-opp-Delta).
+
+    Phasen, die vor dem Aufzeichnungsbeginn liegen (`covered: False`, s.
+    analysis.phase_deltas), bekommen keinen Balken, sondern den ehrlichen
+    Hinweis - ein 0-Balken laese sich wie 'nichts passiert'."""
     # Skala ueber alle Phasen der Fokusmetrik, damit die Balken vergleichbar sind.
     focus = deltas[0]["focus"] if deltas else "gold"
     mags = [abs(ph["metrics"].get(focus, {}).get("delta") or 0) for ph in deltas]
     scale = max(mags) or 1
     flabel = {"gold": "Gold", "cs": "CS", "dmg": "Schaden",
               "vision": "Vision"}.get(focus, focus)
-    rows = [_pb_row(ph["label"], ph["metrics"].get(focus, {}).get("delta"), scale)
+    rows = [_pb_row(ph["label"], ph["metrics"].get(focus, {}).get("delta"),
+                    scale, _na_text(ph))
             for ph in deltas]
     return (f'<div class="pb-head">Fokus: {flabel} vs. Gegenpart '
             f'(Phasen-Delta)</div>' + "".join(rows))
@@ -580,7 +600,8 @@ def _impact_phase_bars(rows: list | None) -> str:
     if not rows:
         return ""
     scale = max((abs(r.get("delta") or 0) for r in rows), default=0) or 1
-    bars = "".join(_pb_row(r["label"], r.get("delta"), scale) for r in rows)
+    bars = "".join(_pb_row(r["label"], r.get("delta"), scale, _na_text(r))
+                   for r in rows)
     return (f'<div class="tcp"><div class="tcp-h">'
             f'{_esc(analysis.IMPACT_PHASE_LABEL)}</div>{bars}'
             f'<div class="tcp-note">Heilung/Saves nur als Gesamtwert</div></div>')
@@ -709,6 +730,173 @@ def _roster_row(report: dict) -> str:
     return f'<div class="roster">{"".join(rows)}</div>'
 
 
+# --- Fairness der Lobby (Rang + Rollen-Wahl je Rolle) -----------------------
+#
+# Gespiegeltes Raster (Nutzer-Vorgabe): beide Seiten laufen ZUR MITTE HIN in
+# derselben Reihenfolge, damit die Raenge unmittelbar am Vergleich stehen:
+#
+#   Name · Champion · [Wahl] · Level · [≈] · Rang │ > Δ > │ gespiegelt
+#
+# Jede Spalte hat eine feste Breite (CSS-Variablen --fr-*), sodass Namen,
+# Champions, Level und Raenge ueber alle Zeilen INKLUSIVE Kopf- und Mittelzeile
+# senkrecht fluchten. Leere Zellen bleiben als Platzhalter stehen und
+# kollabieren nicht - sonst verrutscht die Achse. Einzige flexende Spalte ist
+# der Name (aeusserste, minmax(--fr-name,1fr)); ueberlange Namen kappen per
+# ellipsis, der volle Name steht im title-Attribut.
+
+_FAIR_COLS = ("Name", "Champion", "Wahl", "Level", "", "Rang")
+
+
+def _fair_rank_cell(rank) -> str:
+    """Rang-Zelle: Tier + Division, ohne LP (Nutzer-Entscheid). '—' wenn leer."""
+    if not rank:
+        return '<div class="c-rank muted">—</div>'
+    cls = "c-rank est" if rank.get("estimated") else "c-rank"
+    # LP werden bewusst NICHT angezeigt (Nutzer-Entscheid) - sie fliessen nur in
+    # den Punkte-Score ein. Der Tooltip nennt bei Schaetzungen ihre Basis.
+    title = ""
+    if rank.get("estimated"):
+        title = (f' title="Geschätzt: Median aus {rank.get("basis", 0)} '
+                 f'Mitspielern der letzten Spiele"')
+    return f'<div class="{cls}"{title}>{_esc(rank.get("label") or "—")}</div>'
+
+
+def _fair_origin_cell(rank) -> str:
+    """Herkunfts-Spalte: '≈' bei Schaetzung, 'Flex' bei Flex-Rang, sonst leer.
+
+    Beide Marker schliessen sich aus - geschaetzt wird nur, wer weder Solo noch
+    Flex hat. Die Zelle bleibt auch leer als Platzhalter stehen."""
+    if not rank:
+        return "<div></div>"
+    if rank.get("estimated"):
+        return '<div><span class="badge estb">≈</span></div>'
+    if rank.get("source") == "flex":
+        return '<div><span class="badge">Flex</span></div>'
+    return "<div></div>"
+
+
+def _fair_badge_cell(side: dict) -> str:
+    """Wahl-Badge - nur bei Zweitwahl/Autofill. Erstwahl ist ein Nicht-Befund."""
+    badge = side.get("badge")
+    if not badge:
+        return "<div></div>"
+    cls = "fill" if badge == "AUTOFILL" else "sec"
+    return f'<div><span class="badge {cls}">{_esc(badge)}</span></div>'
+
+
+def _fair_side(side, opp_side: bool) -> str:
+    """Eine Seite einer Rollen-Zeile; `opp_side` dreht die Spaltenfolge um."""
+    cls = "side side-opp" if opp_side else "side side-me"
+    if not side:
+        empty = "<div></div>" * 5
+        return (f'<div class="{cls}">{empty}'
+                f'<div class="c-champ muted">kein Gegenpart</div></div>'
+                if opp_side else
+                f'<div class="{cls}"><div class="c-champ muted">—</div>{empty}</div>')
+    name = _esc(_disp_name(side.get("name")))
+    me_tag = '<span class="me-tag">DU</span>' if side.get("is_me") else ""
+    cells = [
+        f'<div class="c-name" title="{_esc(side.get("name"))}">{name}{me_tag}</div>',
+        f'<div class="c-champ">{_esc(side.get("champ"))}</div>',
+        _fair_badge_cell(side),
+        f'<div class="c-lvl">Lvl {int(side.get("level") or 0)}</div>',
+        _fair_origin_cell(side.get("rank")),
+        _fair_rank_cell(side.get("rank")),
+    ]
+    if opp_side:
+        cells.reverse()
+    return f'<div class="{cls}">{"".join(cells)}</div>'
+
+
+def _fair_delta(points, div_value, estimated: bool, unit: str) -> str:
+    """Delta-Mitte: `> Δ >` = linke Seite hoeher, `< Δ <` = Gegenseite hoeher.
+
+    Die Farbe codiert NUR die Richtung aus Sicht des eigenen Teams, keine
+    Wertung. Stuetzt sich eine der beiden Seiten auf einen geschaetzten Rang,
+    traegt auch der abgeleitete Wert das ≈-Praefix."""
+    if points is None or div_value is None:
+        return '<div class="delta muted">—</div>'
+    prefix = "≈" if estimated else ""
+    value = f"{abs(div_value):.1f}".replace(".", ",")
+    if not points:
+        # Gleichstand hat keine Richtung - Pfeile UND Farbe waeren hier eine
+        # Aussage, die die Zahl nicht hergibt.
+        return (f'<div class="delta"><span class="even">{prefix}{value}</span>'
+                f'<span class="dsub">{_esc(unit)}</span></div>')
+    up = points > 0
+    arrow = "&gt;" if up else "&lt;"
+    cls = "up" if up else "down"
+    return (f'<div class="delta"><span class="arr">{arrow}</span>'
+            f'<span class="{cls}">{prefix}{value}</span>'
+            f'<span class="arr">{arrow}</span>'
+            f'<span class="dsub">{_esc(unit)}</span></div>')
+
+
+def _fair_mean_side(mean: dict, opp_side: bool) -> str:
+    """Mittel-Zeile einer Seite: Basis-Angabe + Team-Mittel im Rang-Slot."""
+    cls = "side side-opp" if opp_side else "side side-me"
+    est = mean.get("estimated", 0)
+    cells = [
+        "<div></div>",
+        "<div></div>",
+        f'<div class="basis">{mean.get("measured", 0)} gemessen</div>',
+        f'<div class="basis">{est} ≈</div>' if est else "<div></div>",
+        "<div></div>",
+        (f'<div class="c-rank">{_esc(mean.get("label"))}</div>'
+         if mean.get("label") else '<div class="c-rank muted">—</div>'),
+    ]
+    if opp_side:
+        cells.reverse()
+    return f'<div class="{cls}">{"".join(cells)}</div>'
+
+
+def _fairness_section(report: dict) -> str:
+    """Fairness-Sektion: je Rolle eigener Spieler gegen den Gegenpart mit Rang,
+    Rollen-Wahl und Account-Level, darunter Team-Mittel und Verdikt.
+
+    Die Sektion bricht als EINZIGE aus dem 1080px-Report-Wrap aus (eigener
+    breiterer Container, s. `.fair-wide`) - das gespiegelte Raster braucht die
+    Breite, alle uebrigen Sektionen bleiben unveraendert."""
+    fair = report.get("fairness") or {}
+    rows = fair.get("rows") or []
+    head_me = "".join(f"<div>{_esc(c)}</div>" for c in _FAIR_COLS)
+    head_opp = "".join(f"<div>{_esc(c)}</div>" for c in reversed(_FAIR_COLS))
+    out = [f'<div class="frow fhead"><div class="frole">Rolle</div>'
+           f'<div class="side side-me">{head_me}</div>'
+           f'<div class="delta">Δ</div>'
+           f'<div class="side side-opp">{head_opp}</div></div>']
+    for row in rows:
+        out.append(
+            f'<div class="frow"><div class="frole">{_esc(row["role"])}</div>'
+            f'{_fair_side(row.get("me"), False)}'
+            f'{_fair_delta(row.get("delta"), row.get("delta_div"), row.get("estimated"), "Divisionen")}'
+            f'{_fair_side(row.get("opp"), True)}</div>')
+    mean = fair.get("mean") or {}
+    out.append(
+        f'<div class="frow fmean"><div class="frole">MITTEL</div>'
+        f'{_fair_mean_side(mean.get("me") or {}, False)}'
+        f'{_fair_delta(mean.get("delta"), mean.get("delta_tiers"), mean.get("estimated"), "Tiers")}'
+        f'{_fair_mean_side(mean.get("opp") or {}, True)}</div>')
+
+    verdict = "".join(f"<li>{_esc(line)}</li>"
+                      for line in (fair.get("verdict") or []))
+    verdict_html = (f'<div class="fverdict"><ul>{verdict}</ul></div>'
+                    if verdict else "")
+    foot = ('Rang = Ranked Solo/Duo, ersatzweise Flex (Badge '
+            '<span class="badge">Flex</span>), zum Abrufzeitpunkt; LP fließen in '
+            'den Punkte-Vergleich ein, werden aber nicht angezeigt. '
+            '<span class="badge estb">≈</span> = geschätzt: Median der Ränge von '
+            'bis zu sechs Mitspielern aus den letzten zwei Spielen des Spielers — '
+            'in Normal-Queues stammen die aus Normal-Spielen, die Einordnung ist '
+            'damit grob. Ein Wahl-Badge erscheint nur, wenn die Rolle nicht '
+            'Erstwahl war: <span class="badge sec">OFFROLE</span> = auf der '
+            'Zweitwahl gelandet, <span class="badge fill">AUTOFILL</span> = Rolle '
+            'zugeteilt. Account-Level aus den Match-Daten.')
+    return (f'<div class="fair-wide"><div class="fair-card">'
+            f'<div class="ftable">{"".join(out)}</div>{verdict_html}'
+            f'<div class="ffoot">{foot}</div></div></div>')
+
+
 # --- Side-by-side-Scoreboard ------------------------------------------------
 
 def _kda_ratio(kda) -> float:
@@ -818,12 +1006,23 @@ def _objectives_block(report: dict) -> str:
 
 def _phase_pair_bars(rows: list, me_label: str, opp_label: str) -> str:
     """Paar-Balken je Phase (Early/Mid/Late): eigener Wert vs. Gegenpart, auf die
-    gemeinsame Maximalskala normiert. `rows`: [{label, me, opp}]."""
+    gemeinsame Maximalskala normiert. `rows`: [{label, me, opp}].
+
+    Eine Phase vor dem Aufzeichnungsbeginn (`covered: False`) traegt keine Zahlen
+    und bekommt darum statt zweier Nullbalken den Hinweis `_NODATA_PHASE` - der
+    Vergleich existiert dort nicht."""
     scale = max([abs(r["me"] or 0) for r in rows]
                 + [abs(r["opp"] or 0) for r in rows if r["opp"] is not None]
                 + [1])
     out = []
     for r in rows:
+        if r.get("covered") is False:
+            out.append(
+                f'<div class="gb-row"><span class="gb-lab">'
+                f'{_esc(r["label"])}</span><div class="gb-bars">'
+                f'<span class="gb-na">{_esc(_NODATA_PHASE)}</span>'
+                f'</div></div>')
+            continue
         me_w = 100 * (r["me"] or 0) / scale
         if r["opp"] is None:
             opp_bar = '<div class="gb-bar"><span class="gb-na">—</span></div>'
@@ -1240,6 +1439,15 @@ def _status_chip(report: dict) -> str:
 
 
 def render_html(report: dict) -> str:
+    # Report-Generator-Version: maschinenlesbar als <meta> (die Match-History
+    # erkennt daran veraltete Reports) und dezent menschenlesbar in der
+    # Fusszeile. Der Wert steht im Report-Modell (`build_report` stempelt ihn);
+    # fehlt er (key-freier Stufe-1-Report), gilt der aktuelle Stand - dieses
+    # HTML entsteht ja gerade eben. Import erst hier, damit `render` nicht am
+    # Paket-`__init__` haengt, das seinerseits `render` importiert.
+    from . import REPORT_VERSION
+    raw_version = report.get("report_version")
+    version = int(raw_version) if raw_version is not None else REPORT_VERSION
     win = report["win"]
     me = report["me"]
     v = report["verdict"]
@@ -1261,7 +1469,10 @@ def render_html(report: dict) -> str:
                if has_dmg else " und Vision (Ward-Score)")
                + " — du gegen deinen Rollen-Gegenpart und dein Team gegen das "
                "gegnerische. Werte je Minute.")
-    if report.get("winprob"):
+    # Nur ankuendigen, was auch gezeichnet wird: bei sehr spaetem Capture kann
+    # die Kurve ausschliesslich aus aufgefuellten (None-)Minuten bestehen - dann
+    # faellt der Chart weg und der Satz waere ein Verweis ins Leere.
+    if any(wv is not None for wv in report.get("winprob") or []):
         lede_01 += (" Zum Schluss die Gewinnchance über die Zeit — eine "
                     "heuristische Schätzung aus diesen Team-Signalen, kein "
                     "trainiertes Modell.")
@@ -1327,8 +1538,8 @@ def render_html(report: dict) -> str:
         "Objectives & Tode",
         "Objective-Kontrolle des Teams und wann deine Tode fielen.",
         _objectives_block(report)))
-    # Teamfights bewusst als LETZTE nummerierte Sektion (Nutzer-Wunsch
-    # 2026-07-25): grosser Block, erst fuer die Deep-Analyse interessant.
+    # Teamfights: grosser Block, erst fuer die Deep-Analyse interessant
+    # (Nutzer-Wunsch 2026-07-25) - steht darum weit hinten.
     if report.get("teamfights"):
         specs.append((
             "Teamfights",
@@ -1337,10 +1548,27 @@ def render_html(report: dict) -> str:
             "dein Team, rechts der Gegner). Gefallene sind durchgestrichen und "
             "ausgegraut.",
             _teamfight_section(report)))
+    # Fairness ganz zum Schluss (Nutzer-Wunsch 2026-08-07): die Sektion
+    # beschreibt die Zusammenstellung der Lobby, nicht das Spiel selbst - sie
+    # ist der Abbinder hinter allem Spielerischen, auch hinter den Teamfights.
+    # Konditional: ohne fairness-Modell (Remake, abgeschaltet, key-freier Pfad)
+    # taucht sie gar nicht auf.
+    if report.get("fairness"):
+        specs.append((
+            "Fairness der Lobby",
+            "Je Rolle dein Spieler gegen den direkten Gegenpart. Beide Seiten "
+            "sind zur Mitte hin gespiegelt aufgebaut — Name, Champion, "
+            "Rollen-Badge, Level, Rang —, sodass die Ränge direkt am Vergleich "
+            "sitzen. Der Rang kommt aus Ranked Solo/Duo, ersatzweise aus Flex; "
+            "wo beides fehlt, steht eine aus Mitspielern geschätzte Einordnung. "
+            "Die Sektion beschreibt die Zusammenstellung des Spiels, nicht "
+            "seinen Ausgang.",
+            _fairness_section(report)))
     sections = "".join(_section(i, t, lede, b)
                        for i, (t, lede, b) in enumerate(specs, start=1))
 
     return f"""<title>Post-Game {_esc(report['match_id'])} — {_esc(me['champ'])}</title>
+<meta name="report-version" content="{version}">
 <style>
 {_CSS}
 </style>
@@ -1372,6 +1600,7 @@ def render_html(report: dict) -> str:
 {_disclaimer_block(report)}
   <footer>
     {_esc(footer)}
+    <span class="gen-ver">Report-Generator v{version}</span>
   </footer>
 </div>
 """
@@ -1577,6 +1806,7 @@ tbody td small{display:block;color:var(--muted);font-weight:500;font-size:10.5px
 
 footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);
   font-size:13px;font-family:var(--mono);}
+.gen-ver{display:block;margin-top:6px;opacity:.75;}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
 a{color:var(--accent);}
 
@@ -1771,6 +2001,81 @@ a{color:var(--accent);}
 .tr-splits{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
 @media (max-width:720px){.tr-splits{grid-template-columns:1fr;}}
 .tr-recur{margin:6px 0 0;padding-left:18px;color:var(--ink-2);font-size:13.5px;line-height:1.7;}
+
+/* --- Fairness der Lobby ---------------------------------------------------
+   Spaltenbreiten CONTAINER-proportional als minmax(px-Minimum, fr-Anteil):
+   die Tracks teilen sich exakt die Kartenbreite - nichts kann ueberlaufen
+   (kein Scrollbalken), nichts bleibt links liegen. Frueher waren das
+   vw-clamps; die skalieren mit dem VIEWPORT, die Karte ist aber gedeckelt -
+   auf breiten Monitoren ueberstiegen die Minima die Karte (Scrollbalken
+   rechts, Leerraum links). Alle Zeilen lesen dieselben Variablen, die
+   Fluchtung bleibt exakt; die fr-Anteile gewichten nur die Verteilung. */
+:root{
+  --fr-role:48px;
+  --fr-name:minmax(92px,1.05fr);
+  --fr-champ:minmax(58px,.8fr);
+  --fr-badge:minmax(56px,.55fr);
+  --fr-lvl:minmax(46px,.6fr);
+  --fr-est:minmax(26px,.4fr);
+  --fr-rank:minmax(76px,1.1fr);
+  --fr-delta:clamp(78px,5vw,100px);
+  --fr-gap:clamp(4px,0.5vw,10px);
+}
+/* Einzige Sektion, die aus dem 1080px-Wrap ausbricht (Nutzer-Wunsch 1440p):
+   das gespiegelte Raster braucht etwas Breite, alle uebrigen bleiben schmal.
+   Deckel bewusst 1280px (Nutzer-Feedback: 1720px spreizte die Spalten zu
+   weit auseinander) - die Name-Spalten flexen, der Rest bleibt kompakt. */
+.fair-wide{width:min(1280px,94vw);margin-left:50%;transform:translateX(-50%);}
+.fair-card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  box-shadow:var(--shadow);padding:18px 16px;overflow-x:auto;}
+.ftable{min-width:920px;}
+.frow{display:grid;grid-template-columns:var(--fr-role) 1fr var(--fr-delta) 1fr;
+  align-items:center;padding:8px 0;border-bottom:1px solid var(--line);}
+.frow:last-child{border-bottom:none;}
+.frole{font-family:var(--mono);font-size:11px;letter-spacing:.05em;color:var(--muted);}
+.side{display:grid;gap:var(--fr-gap);align-items:center;}
+.side-me{grid-template-columns:var(--fr-name) var(--fr-champ)
+  var(--fr-badge) var(--fr-lvl) var(--fr-est) var(--fr-rank);}
+.side-opp{grid-template-columns:var(--fr-rank) var(--fr-est) var(--fr-lvl)
+  var(--fr-badge) var(--fr-champ) var(--fr-name);}
+.side>*{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.side-me>*{text-align:right;}
+.side-opp>*{text-align:left;}
+.c-name{font-weight:650;font-size:13.5px;}
+.c-champ{font-size:13px;color:var(--ink-2);}
+.c-lvl{font-family:var(--mono);font-size:11px;color:var(--muted);}
+.c-rank{font-weight:650;font-size:13.5px;font-variant-numeric:tabular-nums;}
+.c-rank.est{color:var(--ink-2);font-weight:500;}
+.me-tag{font-family:var(--mono);font-size:9.5px;background:var(--accent);
+  color:var(--card);border-radius:3px;padding:0 4px;margin-left:5px;
+  vertical-align:1.5px;letter-spacing:.06em;}
+.side-opp .me-tag{margin:0 5px 0 0;}
+.badge{display:inline-block;font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.04em;border-radius:4px;padding:1px 5px;
+  border:1px solid var(--line-strong);color:var(--muted);}
+.badge.fill{background:var(--loss-soft);border-color:var(--loss);color:var(--loss);}
+.badge.sec{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);}
+.badge.estb{background:var(--card-2);}
+.fhead{border-bottom:1px solid var(--line-strong);padding-bottom:6px;margin-bottom:2px;}
+.fhead .side>*{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);font-weight:500;}
+.fhead .frole{color:var(--ink-2);}
+.delta{text-align:center;font-family:var(--mono);font-size:13px;
+  font-variant-numeric:tabular-nums;white-space:nowrap;}
+.delta .arr{color:var(--muted);margin:0 2px;}
+.delta .up{color:var(--win);font-weight:650;}
+.delta .down{color:var(--loss);font-weight:650;}
+.delta .even{color:var(--even);font-weight:650;}
+.dsub{display:block;font-size:9.5px;color:var(--muted);letter-spacing:.04em;}
+.fmean{background:var(--card-2);border-radius:8px;margin-top:8px;padding:10px 0;
+  border-bottom:none;}
+.fmean .c-rank{font-size:15px;font-weight:700;}
+.basis{font-family:var(--mono);font-size:10px;color:var(--muted);}
+.fverdict{margin-top:14px;padding:12px 16px;border-left:3px solid var(--accent);
+  background:var(--card-2);border-radius:0 8px 8px 0;}
+.fverdict ul{margin:0;padding-left:18px;font-size:14px;color:var(--ink);
+  line-height:1.55;}
+.ffoot{font-size:12.5px;color:var(--muted);margin-top:14px;line-height:1.5;}
 """
 
 

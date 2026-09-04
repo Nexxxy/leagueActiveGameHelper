@@ -496,6 +496,35 @@ def standard_defensive_boots(vs: str) -> str | None:
     return fallback
 
 
+def standard_offensive_boots(dmg: str) -> str | None:
+    """Spiegel von `standard_defensive_boots` fuer die AGGRESSIVE Seite des
+    Spielstil-Reglers (plan_spielstil.md F6): kanonische T2-Offensiv-Boots zum
+    EIGENEN Schadenstyp - 'ad' -> Boots mit AttackSpeed-Tag (Berserker's
+    Greaves), 'ap' -> mit MagicPenetration (Sorcerer's Shoes). Wie dort wird die
+    aufwertbare T2-Stufe (hat 'into') bevorzugt; None, wenn nichts passt.
+
+    WARUM ein Fallback ausserhalb der KB-Boots-Liste zulaessig ist: Boots sind
+    ein geschlossener Satz von neun Items, und mancher Champion hat schlicht
+    keinen Offensiv-Boot in seiner gelernten Liste (Briar JUNGLE: Steelcaps /
+    Mercs / Gluttonous, kein Berserker's). Ohne Fallback koennte der Regler auf
+    der aggressiven Seite dort gar nichts bewegen. Derselbe Praezedenzfall wie
+    beim Defensiv-Fallback - und er greift NUR bei Tilt > 0, also auf
+    ausdrueckliche Nutzer-Vorgabe."""
+    tag = "AttackSpeed" if dmg == "ad" else "MagicPenetration"
+    fallback = None
+    for name, (_item_id, item) in by_name().items():
+        tags = item.get("tags", [])
+        if "Boots" not in tags or tag not in tags:
+            continue
+        if item.get("gold", {}).get("total", 0) < 900:
+            continue
+        if item.get("into"):
+            return name
+        if fallback is None:
+            fallback = name
+    return fallback
+
+
 def categorize_gold(item_ids: list[int]) -> dict:
     """Verteilt den Gold-Wert der Items auf die Kategorien ad/ap/defense.
 

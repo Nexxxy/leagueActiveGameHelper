@@ -18,6 +18,21 @@ def _default_log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+# Abbruchmeldung, wenn kein aktiver Key mehr uebrig ist (drei Stellen in `_get`:
+# kein Key beim Runden-Start, Key-Ablehnung per 401, Key-Ablehnung per 403).
+_NO_KEYS = ("Alle API-Keys abgelehnt. Development-Keys laufen nach 24h ab "
+            "- ggf. auf developer.riotgames.com erneuern.")
+
+# Ab wie vielen VERSCHIEDENEN Endpunkten mit 403 ein Key als abgelaufen gilt.
+# WARUM: ein einzelner 403 sagt nicht, ob der KEY oder der ENDPUNKT tot ist -
+# real beobachtet antwortet der deprecated Endpunkt
+# `league-v4/entries/by-summoner` mit 403 fuer voellig gueltige Keys. Ein
+# abgelaufener Key dagegen antwortet auf ALLEN Endpunkten mit 403; sobald ein Key
+# also am zweiten, anderen Endpunkt ebenfalls 403 liefert, ist der Key das
+# Problem und fliegt aus der Rotation.
+KEY_DEAD_403_ENDPOINTS = 2
+
+
 class RiotClient:
     def __init__(self, api_key, platform: str, routing: str,
                  per_sec: int = 20, per_2min: int = 100, log=None):
@@ -54,6 +69,26 @@ class RiotClient:
         self.routing_host = f"{routing}.api.riotgames.com"
         self._session = requests.Session()
         self._sent: dict[int, deque] = {i: deque() for i in range(len(keys))}
+        # Endpunkt-Labels, die fuer diesen Lauf als tot gelten (403 ohne dass der
+        # Key schuld ist, s. KEY_DEAD_403_ENDPOINTS). Weitere Aufrufe werden gar
+        # nicht mehr abgesetzt - das spart Rate-Limit-Budget.
+        self._dead_endpoints: set[str] = set()
+        # Labels, deren Ueberspringen schon gemeldet wurde (eine Log-Zeile je
+        # Endpunkt reicht; ein Crawl ruft denselben Endpunkt tausendfach).
+        self._skip_logged: set[str] = set()
+        # key_idx -> Endpunkt-Labels, die mit diesem Key 403 lieferten.
+        self._key_403: dict[int, set[str]] = {}
+        # Statuscode der ZULETZT erhaltenen HTTP-Antwort dieses Clients (None,
+        # solange noch keine kam bzw. wenn `_get` gar keinen Request absetzte).
+        # WOFUER: `_get` liefert 400 UND 404 gleichermassen als None. Wer beides
+        # unterscheiden muss, liest den Code direkt nach dem Endpunkt-Aufruf -
+        # eine key-FREMDE PUUID quittiert Riot mit 400 (PUUIDs sind pro API-Key
+        # verschluesselt), eine unbekannte mit 404 (s.
+        # `pipeline.harvest.match_ids_healed`).
+        # Gilt je Client-Instanz und ist NICHT fuer nebenlaeufige Aufrufe
+        # desselben Clients gedacht; im Projekt hat jede Region ihren eigenen
+        # Client in ihrem eigenen Thread.
+        self.last_status: int | None = None
 
     # ---- Round-Robin ---------------------------------------------------
 
@@ -69,8 +104,8 @@ class RiotClient:
         """Key dauerhaft aus der Rotation entfernen."""
         if key_idx in self._active:
             self._active.remove(key_idx)
-            self.log(f"[riot] API-Key #{key_idx + 1} abgelehnt (401/403) "
-                     f"- aus Round-Robin entfernt.")
+            self.log(f"[riot] API-Key #{key_idx + 1} abgelehnt (401 bzw. 403 auf "
+                     f"mehreren Endpunkten) - aus Round-Robin entfernt.")
 
     # ---- Rate-Limiting -------------------------------------------------
 
@@ -117,27 +152,53 @@ class RiotClient:
                 best = wait
         return best if best is not None else 0.0
 
-    def _get(self, host: str, path: str, params: dict | None = None):
+    def _get(self, host: str, path: str, params: dict | None = None,
+             endpoint: str | None = None):
         """GET mit Rate-Limiting und Statuscode-Behandlung.
+
+        `endpoint` ist ein STABILES Label des Endpunkts (z. B. "match-ids"),
+        unabhaengig von den in `path` eingesetzten IDs - daran haengt die
+        403-Behandlung. None -> der rohe `path` (dann ist jede ID ein eigener
+        "Endpunkt", was fuer Adhoc-Aufrufe genuegt).
 
         200 -> JSON; 429 -> Retry-After abwarten; JEDER 5xx (>= 500) ->
         Backoff-Retry (nach 8 Versuchen RuntimeError); 404 -> None;
-        401/403 -> Key deaktivieren; sonstige 4xx (400 etc.) -> Warnung
-        auf stderr und None (ein kaputter Spieler soll den Lauf nicht
-        abbrechen).
+        401 -> Key deaktivieren; 403 -> endpunkt-lokal abschalten bzw. (ab
+        KEY_DEAD_403_ENDPOINTS verschiedenen Endpunkten) Key deaktivieren;
+        sonstige 4xx (400 etc.) -> Warnung auf stderr und None (ein kaputter
+        Spieler soll den Lauf nicht abbrechen).
+
+        WARUM 401 und 403 nicht mehr gleich behandelt werden: 403 heisst bei Riot
+        nicht zwingend 'Key ungueltig'. Deprecated Endpunkte antworten mit 403
+        fuer voellig gueltige Keys (real: `league-v4/entries/by-summoner`) - der
+        Key global aus der Rotation zu werfen kostete dann den ganzen Lauf. Ein
+        403 sperrt darum zunaechst nur DEN ENDPUNKT (`_dead_endpoints`, alle
+        weiteren Aufrufe liefern ohne HTTP-Request None). Erst wenn DERSELBE Key
+        auf mehreren verschiedenen Endpunkten 403 liefert, ist er wirklich
+        abgelaufen und fliegt raus (s. KEY_DEAD_403_ENDPOINTS).
+
+        `self.last_status` traegt nach jedem Aufruf den Statuscode der zuletzt
+        erhaltenen HTTP-Antwort (None, wenn keine kam - abgeschalteter Endpunkt,
+        reine Verbindungsfehler). Nur darueber laesst sich ein 400 von einem 404
+        unterscheiden, weil beide als None zurueckkommen.
 
         Bewusst ALLE Statuscodes >= 500 (nicht nur 500/502/503/504) als
         transient behandeln: Riot laeuft hinter Cloudflare, das eigene
         5xx-Codes liefert (520/521/522/524). Die wurden frueher bis
         raise_for_status() durchgereicht und rissen den ganzen Fetch ab."""
+        self.last_status = None
+        label = endpoint or path
+        if label in self._dead_endpoints:
+            if label not in self._skip_logged:
+                self._skip_logged.add(label)
+                self.log(f"[riot] Endpunkt {label} gilt fuer diesen Lauf als tot "
+                         f"(403) - Aufrufe werden uebersprungen.")
+            return None
         url = f"https://{host}{path}"
         for attempt in range(8):
             key_idx = self._next_key()
             if key_idx is None:
-                raise SystemExit(
-                    "Alle API-Keys abgelehnt. Development-Keys laufen nach 24h "
-                    "ab - ggf. auf developer.riotgames.com erneuern."
-                )
+                raise SystemExit(_NO_KEYS)
             self._throttle(key_idx)
             self._sent[key_idx].append(time.monotonic())
             try:
@@ -148,6 +209,7 @@ class RiotClient:
             except requests.RequestException:
                 time.sleep(3 * (attempt + 1))
                 continue
+            self.last_status = resp.status_code
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code == 429:
@@ -160,14 +222,26 @@ class RiotClient:
                 continue
             if resp.status_code == 404:
                 return None
-            if resp.status_code in (401, 403):
+            if resp.status_code == 401:
+                # 401 ist eindeutig: der Key selbst wird abgelehnt.
                 self._disable_key(key_idx)
                 if not self._active:
-                    raise SystemExit(
-                        "Alle API-Keys abgelehnt. Development-Keys laufen nach "
-                        "24h ab - ggf. auf developer.riotgames.com erneuern."
-                    )
+                    raise SystemExit(_NO_KEYS)
                 continue
+            if resp.status_code == 403:
+                seen = self._key_403.setdefault(key_idx, set())
+                seen.add(label)
+                if len(seen) >= KEY_DEAD_403_ENDPOINTS:
+                    # Muster 'abgelaufener Key': 403 auf mehreren Endpunkten.
+                    self._disable_key(key_idx)
+                    if not self._active:
+                        raise SystemExit(_NO_KEYS)
+                    continue
+                self._dead_endpoints.add(label)
+                self._skip_logged.add(label)
+                self.log(f"[riot] Endpunkt {label} antwortet 403 - fuer diesen "
+                         f"Lauf uebersprungen, Key bleibt aktiv.")
+                return None
             # Verbleibende 4xx (z. B. 400 fuer PUUIDs, die der Endpoint nicht
             # verarbeiten kann - etwa Altbestand aus Caches): EIN kaputter
             # Spieler darf den Lauf nicht killen. Warnen und ueberspringen.
@@ -180,10 +254,16 @@ class RiotClient:
         raise RuntimeError(f"Zu viele Fehlversuche: {url}")
 
     # ---- Endpoints -----------------------------------------------------
+    #
+    # Jede Methode gibt `_get` ein stabiles Endpunkt-Label mit (`endpoint=`):
+    # der `path` traegt IDs/PUUIDs und ist damit je Aufruf anders - die
+    # 403-Behandlung (s. `_get`) braucht aber einen Namen fuer DEN ENDPUNKT.
 
     def league(self, tier: str, queue: str = "RANKED_SOLO_5x5"):
         """tier: challenger | grandmaster | master"""
-        return self._get(self.platform_host, f"/lol/league/v4/{tier}leagues/by-queue/{queue}")
+        return self._get(self.platform_host,
+                         f"/lol/league/v4/{tier}leagues/by-queue/{queue}",
+                         endpoint="league")
 
     def league_entries(self, tier: str, division: str, page: int = 1,
                        queue: str = "RANKED_SOLO_5x5"):
@@ -192,7 +272,25 @@ class RiotClient:
             self.platform_host,
             f"/lol/league/v4/entries/{queue}/{tier}/{division}",
             params={"page": page},
+            endpoint="league-entries",
         )
+
+    def league_entries_by_puuid(self, puuid: str):
+        """Ranked-Eintraege EINES Spielers (Solo/Flex/...) ueber league-v4.
+
+        Rueckgabe: rohe Entry-Liste (leere Liste = unranked), None bei 404 oder
+        wenn Riot den Aufruf ablehnt (z. B. HTTP 400 fuer eine PUUID, die mit
+        einem ANDEREN API-Key verschluesselt wurde - PUUIDs sind key-gebunden,
+        s. `app/postgame/fairness.py`).
+
+        Bewusst KEIN Fallback auf den deprecated Weg
+        `/lol/league/v4/entries/by-summoner/{summonerId}`: der antwortet
+        inzwischen mit 403 und liefert damit nichts als eine Warnzeile plus einen
+        fuer den Rest des Laufs abgeschalteten Endpunkt (s. `_get`) - der tote
+        Pfad waere also nutzlos."""
+        return self._get(self.platform_host,
+                         f"/lol/league/v4/entries/by-puuid/{puuid}",
+                         endpoint="league-entries-by-puuid")
 
     def mastery_top(self, puuid: str, count: int = 15):
         """Top-Champion-Masteries eines Spielers (inkl. lastPlayTime)."""
@@ -200,10 +298,13 @@ class RiotClient:
             self.platform_host,
             f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}/top",
             params={"count": count},
+            endpoint="mastery-top",
         )
 
     def summoner_by_id(self, summoner_id: str):
-        return self._get(self.platform_host, f"/lol/summoner/v4/summoners/{summoner_id}")
+        return self._get(self.platform_host,
+                         f"/lol/summoner/v4/summoners/{summoner_id}",
+                         endpoint="summoner")
 
     def match_ids(self, puuid: str, queue: int | None = None, count: int = 20,
                   start_time: int | None = None, *,
@@ -239,6 +340,7 @@ class RiotClient:
             self.routing_host,
             f"/lol/match/v5/matches/by-puuid/{puuid}/ids",
             params=params,
+            endpoint="match-ids",
         )
 
     def account_by_riot_id(self, game_name: str, tag_line: str):
@@ -250,10 +352,34 @@ class RiotClient:
         return self._get(
             self.routing_host,
             f"/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}",
+            endpoint="account-by-riot-id",
+        )
+
+    def account_by_puuid(self, puuid: str):
+        """PUUID -> Account (u. a. `gameName`/`tagLine`) ueber account-v1.
+
+        Gegenrichtung zu `account_by_riot_id`, ebenfalls auf dem Regional-
+        Routing-Host. Rueckgabe roh (Dict) bzw. None.
+
+        **Key-Bindung:** Riot verschluesselt PUUIDs PRO API-KEY. Der Aufruf
+        funktioniert also nur fuer PUUIDs, die mit DEMSELBEN Key aufgeloest
+        wurden; eine fremde PUUID quittiert Riot mit HTTP 400, was `_get` bereits
+        als None abfaengt (Warnzeile, kein Abbruch). Genutzt wird er, um von einer
+        PUUID auf die key-UNABHAENGIGE Riot-ID zu kommen - der einzige
+        Identitaetsvergleich, der auch gegen gecachte Matches eines anderen Keys
+        trifft (s. `app/postgame/fetch.resolve_me_pid`)."""
+        return self._get(
+            self.routing_host,
+            f"/riot/account/v1/accounts/by-puuid/{puuid}",
+            endpoint="account-by-puuid",
         )
 
     def match(self, match_id: str):
-        return self._get(self.routing_host, f"/lol/match/v5/matches/{match_id}")
+        return self._get(self.routing_host,
+                         f"/lol/match/v5/matches/{match_id}",
+                         endpoint="match")
 
     def match_timeline(self, match_id: str):
-        return self._get(self.routing_host, f"/lol/match/v5/matches/{match_id}/timeline")
+        return self._get(self.routing_host,
+                         f"/lol/match/v5/matches/{match_id}/timeline",
+                         endpoint="timeline")

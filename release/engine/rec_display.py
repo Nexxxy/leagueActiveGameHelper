@@ -10,6 +10,19 @@ from .rec_context import _RecContext
 from .rec_path import _int_slot_dist
 
 
+def _class_only(rec: dict) -> bool:
+    """Klassen-Karte OHNE Pool-Zugehoerigkeit - der klassische Fallback (Review
+    Befund 4.3), der per Design immer hinter der Champion-Evidenz rankt.
+
+    Das Spielstil-Klassen-Overlay (plan_spielstil.md F3) traegt dasselbe
+    `source: "class"`-Label - es ist dieselbe HERKUNFT und soll auch so
+    beschriftet sein -, ist aber ein regulaerer Pool-Kandidat mit Score. Das
+    eigene Flag `style_overlay` trennt die beiden Faelle; ohne die Trennung
+    fiele das Overlay durch dieselbe Ausschluss-Klausel, die den Fallback
+    draussen haelt, und haette gar keine Wirkung."""
+    return rec.get("source") == "class" and not rec.get("style_overlay")
+
+
 def _path_winner(ctx: _RecContext, recs: list[dict]) -> str | None:
     """Sieger des gemeinsamen Kandidatenpools (V2-05) - der Name, der im
     Restpfad-Modus die Rolle uebernimmt, die vorher das Core-Item per Vorfahrt
@@ -82,7 +95,7 @@ def _now_rel(ctx: _RecContext, recs: list[dict], next_pick: dict | None) -> None
     for rec in recs:
         name = rec["item"]
         score = ctx.path_scores.get(name)
-        if (score is None or score <= 0.0 or rec.get("source") == "class"
+        if (score is None or score <= 0.0 or _class_only(rec)
                 or name in ctx.path_block or _pool_excluded(rec)):
             continue
         eligible[name] = (rec, score)

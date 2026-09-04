@@ -88,6 +88,14 @@ KINDS: dict[str, tuple[bool, str]] = {
     "timelines": (True,  "platform"),
     "matchids":  (True,  "hash"),
     "mastery":   (False, "hash"),
+    # Ranked-Eintraege je PUUID (league-v4) fuer die Fairness-Sektion des
+    # Post-Game-Reports. Wie `mastery` patch-unabhaengig und hash-geshardet;
+    # die Frische entscheidet der `t`-Stempel (TTL: postgame.rank_ttl_hours).
+    "ranks":     (False, "hash"),
+    # Riot-ID -> PUUID (account-v1). Der Schluessel traegt die KEY-IDENTITAET
+    # mit ("<sha1(key)[:8]>|<name#tag>"): PUUIDs sind pro API-Key
+    # verschluesselt, ein Eintrag eines fremden Keys ist wertlos (HTTP 400).
+    "accounts":  (False, "hash"),
 }
 
 

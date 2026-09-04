@@ -22,6 +22,7 @@ def set_source(path: Path | None) -> None:
     _PINNED = Path(path) if path is not None else None
     load.cache_clear()
     _simplified_keys.cache_clear()
+    _simplified_cc_keys.cache_clear()
 
 
 def source_path() -> Path | None:
@@ -95,10 +96,22 @@ def cc_prior_for_id(cid: str | None) -> float | None:
     """Data-Dragon-ID -> cc_per_min (CC-Sekunden/Minute) aus dem cc_priors-Block
     der builds.yaml, oder None wenn der Champion keinen Prior hat. Analog zu
     champions.ad_share_for_id: 'unbekannt' bleibt None (der Aufrufer laesst solche
-    Gegner beim Team-Mittel weg)."""
+    Gegner beim Team-Mittel weg).
+
+    Casing-fest wie `_canonical` fuer den champions-Block: der cc_priors-Block
+    ist am Match-V5-`championName` gekeyt ("FiddleSticks"), die Serve-Seite
+    fragt mit der Data-Dragon-ID ("Fiddlesticks"). Ohne den vereinfachten
+    Abgleich bekaeme genau dieser Champion live KEINEN CC-Prior und fiele aus
+    dem Team-CC-Mittel (Tenacity-Boots-Regel) - waehrend die Pipeline ihn
+    zaehlt. Das ist die Serve-Haelfte desselben Befunds, den
+    `pipeline/aggregate._canon_priors` auf der Train-Seite schliesst; beide
+    Seiten muessen denselben Prior finden (Review-Befund G)."""
     if not cid:
         return None
-    entry = load().get("cc_priors", {}).get(cid)
+    priors = load().get("cc_priors", {})
+    entry = priors.get(cid)
+    if entry is None:
+        entry = priors.get(_simplified_cc_keys().get(_simplify_name(cid), ""))
     return entry.get("cc_per_min") if entry else None
 
 
@@ -112,14 +125,28 @@ def _resolver_ctx() -> tuple:
     return ddragon.latest_version_cached(cache_dir), cache_dir
 
 
+def _simplify_name(name: str) -> str:
+    """Kanonisierung der Champion-Kennung - bewusst DIE Funktion, mit der
+    `core.ddragon` seinen Namens-Lookup baut (keine zweite Regel)."""
+    from core.ddragon import _simplify
+    return _simplify(name)
+
+
 @lru_cache(maxsize=1)
 def _simplified_keys() -> dict[str, str]:
     """Vereinfachter KB-Key ('fiddlesticks') -> tatsaechlicher KB-Key
     ('FiddleSticks'). Faengt die Riot-Inkonsistenz ab, dass der Match-V5-
     championName (KB-Key) in der Gross-/Kleinschreibung von der Data-Dragon-ID
     abweichen kann (bekannt: 'FiddleSticks' vs. 'Fiddlesticks')."""
-    from core.ddragon import _simplify
-    return {_simplify(k): k for k in load()["champions"]}
+    return {_simplify_name(k): k for k in load()["champions"]}
+
+
+@lru_cache(maxsize=1)
+def _simplified_cc_keys() -> dict[str, str]:
+    """Wie `_simplified_keys`, nur fuer den `cc_priors`-Block. Eigener Cache,
+    weil der Block einen anderen Schluesselraum hat (nicht jeder Champion mit
+    KB-Eintrag hat einen CC-Prior und umgekehrt)."""
+    return {_simplify_name(k): k for k in load().get("cc_priors", {})}
 
 
 def _canonical(champion: str) -> str:
@@ -131,15 +158,14 @@ def _canonical(champion: str) -> str:
     champions = load()["champions"]
     if champion in champions:
         return champion
-    from core.ddragon import _simplify
     simp = _simplified_keys()
-    hit = simp.get(_simplify(champion))
+    hit = simp.get(_simplify_name(champion))
     if hit:
         return hit
     from core import ddragon
     resolved = ddragon.resolve_name(*_resolver_ctx(), champion)
     if resolved:
-        return simp.get(_simplify(resolved), resolved)
+        return simp.get(_simplify_name(resolved), resolved)
     return champion
 
 
@@ -220,6 +246,34 @@ def boots_cells(champion: str, role: str | None = None) -> dict:
     return {"by_threat": entry.get("boots_by_threat") or {},
             "by_cc": entry.get("boots_by_cc") or {},
             "by_state": entry.get("boots_by_state") or {}}
+
+
+def heal_cells(champion: str, role: str | None = None) -> dict:
+    """Heal-konditionierte Item-Zellen des Champion+Rollen-Eintrags (KB-Dimension
+    by_heal): `{"heal_heavy": {games, base_win_rate, items}}`.
+
+    Nur EIN Bucket - "Gegnerteam hat >= HEAL_HEAVY_MIN Heiler". Leeres Dict fuer
+    KBs, die vor by_heal gebaut wurden (das Feld fehlt dort komplett) und fuer
+    Kombis, deren Heal-Zelle unter den Pipeline-Guards durchgefallen ist. Die
+    Leseseite bekommt dann leere Items und die Schicht bleibt stumm."""
+    _role, entry = for_champion(champion, role)
+    return entry.get("by_heal") or {}
+
+
+def keystone_cells(champion: str, role: str | None = None) -> dict:
+    """Keystone-konditionierte Item-Zellen des Champion+Rollen-Eintrags
+    (KB-Dimension by_keystone): `{"<perk_id>": {games, base_win_rate, items}}`.
+
+    Schluessel sind die Perk-IDs der Hauptrune als STRING (so exportiert die
+    Pipeline sie - YAML-Schluessel muessen eindeutig sein). Der Schluesselraum
+    ist offen: welche Runen ueberhaupt drinstehen, entscheidet die Datenlage
+    (MIN_BUCKET_GAMES je Zelle).
+
+    Leeres Dict fuer KBs, die vor by_keystone gebaut wurden (das Feld fehlt dort
+    komplett - genau wie bei `heal_cells`), und fuer Kombis ohne belegte Zelle.
+    Die Leseseite bekommt dann leere Items und die Schicht bleibt stumm."""
+    _role, entry = for_champion(champion, role)
+    return entry.get("by_keystone") or {}
 
 
 def for_class(bucket: str | None, role: str | None) -> dict:

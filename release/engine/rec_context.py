@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from core import stats
 
 from . import champions, items
+from .rec_antiheal import heal_bucket
 from .rec_weights import CONF_RICH_MIN, SHRINK_K, Weights
 
 
@@ -29,6 +30,22 @@ def _enemy_damage_bucket(enemy_profiles: list[dict]) -> str | None:
                           for p in enemy_profiles) if s is not None]
     bucket = champions.damage_bucket(shares)
     return bucket if bucket in ("ad", "ap") else None
+
+
+def _enemy_heal_bucket(enemy_profiles: list[dict]) -> str | None:
+    """'heal_heavy' | None - Heal-Last des Gegnerteams (KB-Dimension by_heal).
+
+    Serve-Seite der by_heal-Zellen. Ruft BEWUSST dieselbe Funktion auf, mit der
+    `pipeline/aggregate.py` die Zellen gezaehlt hat (`rec_antiheal.heal_bucket`
+    auf der kuratierten Liste `HEALING_THREATS` mit Schwelle `HEAL_HEAVY_MIN`):
+    Train und Serve muessen den Bucket IDENTISCH bilden, sonst fragt die Engine
+    Zellen unter einer anderen Definition ab, als unter der sie entstanden sind
+    (Review-Befund G, s. `_enemy_damage_bucket`).
+
+    Anders als der Anti-Heal-Vorschlag (`_fed_healers`) gibt es hier KEINEN
+    Fed-Trigger: gezaehlt wurde in der Pipeline die COMP (die Picks stehen ab
+    Minute 0 fest), nicht der Spielstand."""
+    return heal_bucket(p.get("champion_id") for p in enemy_profiles)
 
 
 def _spike_warnings(enemy_profiles: list[dict], my_completed: int) -> list[dict]:
@@ -184,6 +201,24 @@ class _RecContext:
     partner_items: dict = field(default_factory=dict)
     partner_base: float | None = None
     partner_bucket: str | None = None
+    # Heal-konditioniert (by_heal) - von _conditional_layers gefuellt. `heal_bucket`
+    # ist "heal_heavy" oder None (nur ein Bucket, kein Komplement); die Items sind
+    # nur dann befuellt, wenn die Schicht ueberhaupt aktiv ist
+    # (weights.heal_factor > 0) und die Kombi `rich` ist.
+    heal_bucket: str | None = None
+    heal_items: dict = field(default_factory=dict)
+    heal_base: float | None = None
+    # Keystone-konditioniert (by_keystone) - `keystone_id`/`keystone_name` setzt
+    # _build_context (nur bei weights.keystone_factor > 0), die Items/Basisrate
+    # kommen aus _conditional_layers. `keystone_id` ist die Perk-ID der EIGENEN
+    # Hauptrune, `keystone_name` ihr Anzeigename NUR wenn eine Quelle ihn
+    # mitliefert (die Live-API tut das, Backtest/Demo nicht) - ohne Namen
+    # formuliert der Begruendungstext neutral. Es gibt bewusst KEINEN
+    # Runen-Static, aus dem der Name nachgeschlagen wuerde.
+    keystone_id: int | None = None
+    keystone_name: str | None = None
+    keystone_items: dict = field(default_factory=dict)
+    keystone_base: float | None = None
     # Klassen-Fallback - von _conditional_layers gefuellt
     lookup_role: str = ""
     class_bucket: str | None = None
@@ -192,6 +227,11 @@ class _RecContext:
     class_games: int = 0
     class_label: str = ""
     champ_pool: set = field(default_factory=set)
+    # Spielstil-Klassen-Overlay aktiv? (plan_spielstil.md F3, gesetzt von
+    # _conditional_layers). True heisst: `class_situational` sind gefilterte
+    # OVERLAY-Kandidaten, die regulaer in den Pool duerfen - nicht der
+    # klassische Klassen-Fallback, der immer hinter der Champion-Evidenz bleibt.
+    style_overlay: bool = False
 
 
 def _tag_role(ctx: _RecContext) -> str | None:

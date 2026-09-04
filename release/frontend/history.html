@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Match History Reports</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1319; --card: #1a2029; --border: #2a3342;
+    --text: #dbe4f0; --muted: #8494ab; --accent: #4fc3f7;
+    --win: #9ccc65; --loss: #ef7b66;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text);
+         font: 15px/1.5 "Segoe UI", system-ui, sans-serif; padding: 20px;
+         max-width: 1000px; margin: 0 auto; }
+  a.back { color: var(--muted); text-decoration: none; font-size: .9rem; }
+  a.back:hover { color: var(--accent); }
+  h1 { font-size: 1.2rem; margin: 10px 0 4px; }
+  .summary { color: var(--muted); font-size: .92rem; margin-bottom: 16px; }
+  .summary b { color: var(--text); }
+  .head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+          margin-bottom: 16px; }
+  .head .summary { margin-bottom: 0; }
+  /* Der Filter traegt im Kopf das auto-Margin (nicht der Knopf): so bleibt die
+     Gruppe rechts, auch wenn "Alle nachladen" gerade ausgeblendet ist. */
+  .player-filter { background: var(--card); color: var(--text); font: inherit;
+               font-size: .85rem; border: 1px solid var(--border);
+               border-radius: 6px; padding: 5px 9px; width: 190px;
+               margin-left: auto; }
+  .player-filter:focus { outline: none; border-color: var(--accent); }
+  .retry-all { background: var(--card); color: var(--accent); font: inherit;
+               font-size: .82rem; border: 1px solid var(--border);
+               border-radius: 6px; padding: 5px 11px; cursor: pointer;
+               margin-left: auto; }
+  .head .retry-all { margin-left: 0; }
+  .retry-all:hover { border-color: var(--accent); }
+  .retry-all[disabled] { color: var(--muted); cursor: default; }
+  .rows { display: flex; flex-direction: column; gap: 6px; }
+  .row { display: grid; gap: 10px; align-items: center;
+         grid-template-columns: 150px 1fr 110px 190px 96px 28px;
+         background: var(--card); border: 1px solid var(--border);
+         border-left-width: 3px; border-radius: 8px; padding: 9px 12px;
+         cursor: pointer; }
+  .row:hover { border-color: var(--accent); }
+  .row.win { border-left-color: var(--win); }
+  .row.loss { border-left-color: var(--loss); }
+  .row.unknown { border-left-color: var(--border); }
+  .row.remake { border-left-color: var(--muted); }
+  .date { color: var(--muted); font-size: .85rem;
+          font-variant-numeric: tabular-nums; }
+  .champ { font-weight: 600; }
+  .champ .role { color: var(--muted); font-weight: 400; font-size: .82rem;
+                 margin-left: 6px; }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 20px;
+          font-size: .76rem; font-weight: 700; color: #10141a; }
+  .chip.win { background: var(--win); }
+  .chip.loss { background: var(--loss); }
+  .chip.unknown { background: var(--border); color: var(--muted); }
+  .chip.remake { background: var(--border); color: var(--text); }
+  .quality { font-size: .82rem; color: var(--muted); }
+  .quality .dot { display: inline-block; width: 8px; height: 8px;
+                  border-radius: 50%; margin-right: 6px; vertical-align: middle;
+                  background: var(--muted); }
+  .quality.ok .dot { background: var(--win); }
+  .quality.pending .dot { background: var(--accent); }
+  .quality.failed .dot { background: var(--loss); }
+  .retry, .fix { background: var(--bg); color: var(--accent); font: inherit;
+           font-size: .8rem; border: 1px solid var(--border); border-radius: 6px;
+           padding: 4px 9px; cursor: pointer; width: 100%; }
+  .retry:hover, .fix:hover { border-color: var(--accent); }
+  .retry[disabled], .fix[disabled] { color: var(--muted); cursor: default;
+                     border-color: var(--border); }
+  /* Fix = Report ist vollstaendig, aber mit einer aelteren Generator-Version
+     gebaut. Dezenter als der Retry (kein fehlender Datenstand). */
+  .fix { color: var(--muted); }
+  .fix:hover { color: var(--accent); }
+  /* Loeschen ist der einzige unumkehrbare Knopf der Zeile (und laeuft auf
+     Nutzer-Wunsch ohne Rueckfrage) - darum gedaempft und erst im Hover rot. */
+  .del { background: none; border: 0; color: var(--muted); font: inherit;
+         font-size: .95rem; line-height: 1; padding: 4px 0; cursor: pointer;
+         width: 100%; }
+  .del:hover { color: var(--loss); }
+  .del[disabled] { color: var(--border); cursor: default; }
+  .err { grid-column: 1 / -1; color: var(--loss); font-size: .78rem; }
+  .empty { margin-top: 40px; text-align: center; color: var(--muted); }
+  .load { margin-top: 24px; padding-top: 14px;
+          border-top: 1px solid var(--border); }
+  .load h2 { font-size: .92rem; font-weight: 600; margin-bottom: 8px; }
+  .load-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .load select, .load input { background: var(--card); color: var(--text);
+          font: inherit; font-size: .85rem; border: 1px solid var(--border);
+          border-radius: 6px; padding: 5px 9px; }
+  .load input { width: 190px; }
+  .load select:focus, .load input:focus { outline: none;
+          border-color: var(--accent); }
+  .load button { margin-left: 0; }
+  .load .hint { color: var(--muted); font-size: .78rem; margin-top: 6px; }
+  .load .err { margin-top: 6px; }
+  .load .ok { color: var(--win); font-size: .78rem; margin-top: 6px; }
+  @media (max-width: 760px) {
+    /* Der Kopf bricht um: das Filter-Feld bekommt eine eigene, volle Zeile -
+       mit auto-Margin haenge es sonst mit seinen 190px ueber den Rand. */
+    .head .player-filter { margin-left: 0; width: 100%; }
+    .row { grid-template-columns: 1fr 1fr; }
+    .date { grid-column: 1 / -1; }
+    /* Der Loesch-Knopf bleibt rechts aussen - unter dem Champion-Namen waere er
+       auf dem Handy eine Fehlklick-Falle. */
+    .del { grid-column: 2; justify-self: end; width: auto; }
+  }
+</style>
+</head>
+<body>
+  <a class="back" href="index.html">&#8592; zur&uuml;ck</a>
+  <h1>&#128220; Match History Reports</h1>
+  <div class="head">
+    <div class="summary" id="summary">wird geladen &hellip;</div>
+    <input class="player-filter" id="playerFilter" type="text" list="playerList"
+           autocomplete="off" placeholder="ALL"
+           title="Nur Spiele mit diesem Mitspieler zeigen &ndash; ALL zeigt alle">
+    <datalist id="playerList"></datalist>
+    <button class="retry-all" id="retryAll" hidden
+            title="Alle unvollst&auml;ndigen Reports nacheinander nachladen">
+      &#8635; Alle nachladen</button>
+  </div>
+  <div class="rows" id="rows"></div>
+  <div class="empty" id="empty" hidden>
+    Noch keine Reports vorhanden &ndash; nach dem n&auml;chsten beendeten Spiel
+    erscheint hier automatisch einer.
+  </div>
+
+  <div class="load">
+    <h2>Spiel manuell nachladen</h2>
+    <div class="load-form">
+      <select id="loadPlatform" title="Server/Platform des Spiels"></select>
+      <input id="loadGameId" type="text" inputmode="numeric" autocomplete="off"
+             placeholder="GameID aus dem Riot-Client">
+      <button class="retry-all" id="loadBtn">Laden</button>
+    </div>
+    <div class="hint">Die Match-ID ist &lt;Platform&gt;_&lt;GameID&gt; &ndash;
+      der Riot-Client zeigt nur die Zahl.</div>
+    <div class="err" id="loadErr" hidden></div>
+  </div>
+
+<script>
+// Texte der Daten-Qualitaet - deckungsgleich mit dem Status-Chip im Report.
+const QUALITY = {
+  ok:       ["ok",      "vollständig"],
+  pending:  ["pending", "wird nachgeladen"],
+  failed:   ["failed",  "fehlgeschlagen"],
+  no_key:   ["nokey",   "key-frei"],
+  disabled: ["nokey",   "übersprungen"],
+  unknown:  ["unknown", "unbekannt"],
+};
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtDate(ms) {
+  const d = new Date(ms);
+  return d.toLocaleString("de-DE", { day: "2-digit", month: "2-digit",
+    year: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+// --- Spieler-Filter ---------------------------------------------------------
+// Gefiltert wird SERVERSEITIG (Limit und Winrate muessen sich auf die gefilterte
+// Menge beziehen) - hier liegt nur der aktive Wert. Er ueberlebt keinen
+// Seitenaufruf: der Default kommt bei jedem Start frisch aus dem Payload
+// (Nutzer-Entscheid, kein localStorage).
+const playerInput = document.getElementById("playerFilter");
+const playerList = document.getElementById("playerList");
+let playerFilter = "";
+
+// "ALL" und leer heissen dasselbe: kein Filter - dann faellt der Parameter ganz
+// weg (der Server unterscheidet beides ohnehin nicht).
+function playerParam() {
+  const v = playerFilter.trim();
+  return !v || v.toUpperCase() === "ALL"
+    ? "" : `?player=${encodeURIComponent(v)}`;
+}
+
+// Vorschlaege kommen aus dem Payload und werden bei jedem Rendern erneuert -
+// die Eingabe des Nutzers bleibt dabei unangetastet.
+function syncPlayerList(players) {
+  playerList.innerHTML = ["ALL"].concat(players || []).map(
+    p => `<option value="${esc(p)}"></option>`).join("");
+}
+
+function applyPlayerFilter() {
+  const value = playerInput.value.trim();
+  if (value === playerFilter) return;    // Enter feuert zusaetzlich `change`
+  playerFilter = value;
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  load().catch(() => {});
+}
+
+// Ein Report gilt als veraltet, wenn er mit einer aelteren Version des
+// Report-Generators gebaut wurde (oder gar keine trug). Der Server liefert das
+// Urteil je Zeile (`outdated`) und den aktuellen Stand einmal im Payload -
+// verglichen wird hier nur noch fuer den Tooltip-Text.
+function fixTitle(g, current) {
+  const from = g.report_version ? `v${g.report_version}` : "ohne Version";
+  return `Mit aktueller Report-Version neu generieren (${from} → v${current})`;
+}
+
+function rowHtml(g, current) {
+  // Remake: neutraler Chip statt Win/Loss - das Spiel zaehlt nicht in die
+  // Winrate (der Server liefert dafuer win=null, s. app/history.py).
+  const outcome = g.remake ? ["remake", "REMAKE"]
+                : g.win === true ? ["win", "Win"]
+                : g.win === false ? ["loss", "Loss"]
+                : ["unknown", "?"];
+  const q = QUALITY[g.status] || QUALITY.unknown;
+  // Genau EIN Knopf je Zeile: fehlende Daten (Retry) haben Vorrang vor einem
+  // blossen Versions-Rueckstand (Fix) - ein Retry baut den Report ohnehin mit
+  // dem aktuellen Generator neu.
+  const action = g.retry_running
+    ? `<button class="retry" disabled>&#9203; lädt …</button>`
+    : (g.retryable
+        ? `<button class="retry" data-id="${esc(g.match_id)}">&#8635; Retry</button>`
+        : (g.fixable
+            ? `<button class="fix" data-id="${esc(g.match_id)}"
+                 title="${esc(fixTitle(g, current))}">&#10227; Fix</button>`
+            : ""));
+  const err = g.retry_error
+    ? `<div class="err">Retry fehlgeschlagen: ${esc(g.retry_error)}</div>` : "";
+  // Loeschen gibt es auf JEDER Zeile (auch auf vollstaendigen Reports) - nur
+  // waehrend ein Lauf an der Datei arbeitet, waere es wirkungslos: der Worker
+  // schreibt die Datei am Ende neu.
+  const del = `<button class="del" data-id="${esc(g.match_id)}"
+      title="Report endgültig löschen"${g.retry_running ? " disabled" : ""}
+      >&#10005;</button>`;
+  return `<div class="row ${outcome[0]}" data-url="${esc(g.url)}">
+    <div class="date">${fmtDate(g.date_ms)}</div>
+    <div class="champ">${esc(g.champ || "unbekannt")}
+      ${g.role ? `<span class="role">${esc(g.role)}</span>` : ""}</div>
+    <div><span class="chip ${outcome[0]}">${outcome[1]}</span></div>
+    <div class="quality ${q[0]}" title="Qualität der nachgeladenen Daten">
+      <span class="dot"></span>${q[1]}</div>
+    <div>${action}</div>
+    ${del}
+    ${err}
+  </div>`;
+}
+
+function render(data) {
+  const games = data.games || [];
+  syncPlayerList(data.players);
+  document.getElementById("empty").hidden = games.length > 0;
+  const unknown = data.unknown ? ` <span>(${data.unknown} unbekannt)</span>` : "";
+  document.getElementById("summary").innerHTML = games.length
+    ? `Letzte <b>${games.length}</b> Spiele · <b>${data.wins}</b> Wins /
+       <b>${data.losses}</b> Losses ·
+       <b>${data.winrate_pct === null ? "–" : data.winrate_pct + " %"}</b>
+       Winrate${unknown}`
+    : "";
+  document.getElementById("rows").innerHTML =
+    games.map(g => rowHtml(g, data.report_version)).join("");
+  // Laeuft irgendwo ein Retry, alle 5 s nachladen, bis er durch ist.
+  const running = games.some(g => g.retry_running);
+  // "Alle nachladen" nur, wenn es etwas zu tun gibt und gerade nichts laeuft
+  // (der Sammel-Lauf setzt alle eingeplanten Zeilen sofort auf retry_running).
+  const btn = document.getElementById("retryAll");
+  btn.hidden = running || !games.some(g => g.retryable);
+  if (!btn.hidden) { btn.disabled = false; btn.innerHTML = "&#8635; Alle nachladen"; }
+  if (running && !pollTimer) pollTimer = setTimeout(poll, 5000);
+}
+
+let pollTimer = null;
+
+async function load() {
+  const resp = await fetch(`/api/history${playerParam()}`);
+  render(await resp.json());
+}
+
+async function poll() {
+  pollTimer = null;
+  try { await load(); } catch (err) { pollTimer = setTimeout(poll, 5000); }
+}
+
+async function startRetry(matchId, btn) {
+  btn.disabled = true;
+  btn.innerHTML = "&#9203; lädt …";
+  try {
+    const resp = await fetch(`/api/history/${encodeURIComponent(matchId)}/retry`,
+                             { method: "POST" });
+    const data = await resp.json();
+    if (!data.started) {
+      btn.disabled = false;
+      btn.textContent = "↻ Retry";
+      btn.title = data.reason || "Retry nicht gestartet";
+      alert(data.reason || "Retry konnte nicht gestartet werden.");
+      return;
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "↻ Retry";
+    return;
+  }
+  if (!pollTimer) pollTimer = setTimeout(poll, 5000);
+}
+
+// Fix: gleicher Ablauf wie der Retry (POST, dann Polling ueber /api/history) -
+// nur ein anderer Endpoint und ein anderes Knopf-Label.
+async function startFix(matchId, btn) {
+  btn.disabled = true;
+  btn.innerHTML = "&#9203; lädt …";
+  try {
+    const resp = await fetch(`/api/history/${encodeURIComponent(matchId)}/fix`,
+                             { method: "POST" });
+    const data = await resp.json();
+    if (!data.started) {
+      btn.disabled = false;
+      btn.innerHTML = "&#10227; Fix";
+      btn.title = data.reason || "Fix nicht gestartet";
+      alert(data.reason || "Fix konnte nicht gestartet werden.");
+      return;
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = "&#10227; Fix";
+    return;
+  }
+  if (!pollTimer) pollTimer = setTimeout(poll, 5000);
+}
+
+// Loeschen: ohne Sicherheitsabfrage (Nutzer-Wunsch - ein Klick genuegt). Die
+// Zeile verschwindet sofort nach der Server-Antwort aus dem DOM, damit der Klick
+// spuerbar wirkt; danach holt load() die Wahrheit nach (Summary/Quote, und
+// etwaige Duplikat-Zeilen desselben Spiels sind serverseitig mit weg).
+async function deleteGame(matchId, btn) {
+  btn.disabled = true;
+  let data;
+  try {
+    const resp = await fetch(
+      `/api/history/${encodeURIComponent(matchId)}/delete`,
+      { method: "POST" });
+    data = await resp.json();
+  } catch (err) {
+    // Netzwerkfehler: nur wieder klickbar machen, kein Alert (das Polling und
+    // ein zweiter Klick klaeren die Lage von selbst).
+    btn.disabled = false;
+    return;
+  }
+  if (!data.deleted) {
+    btn.disabled = false;
+    alert(data.reason || "Report konnte nicht gelöscht werden.");
+    return;
+  }
+  const row = btn.closest(".row");
+  if (row) row.remove();
+  load().catch(() => {});
+}
+
+async function startRetryAll(btn) {
+  btn.disabled = true;
+  btn.innerHTML = "&#9203; lädt …";
+  try {
+    // Derselbe Filter wie die Ansicht: nachgeladen wird nur, was man sieht.
+    const resp = await fetch(`/api/history/retry-all${playerParam()}`,
+                             { method: "POST" });
+    const data = await resp.json();
+    if (!data.started) {
+      btn.disabled = false;
+      btn.innerHTML = "&#8635; Alle nachladen";
+      alert(data.reason || "Sammel-Retry konnte nicht gestartet werden.");
+      return;
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = "&#8635; Alle nachladen";
+    return;
+  }
+  // Sofort neu laden: die eingeplanten Zeilen stehen schon auf "lädt".
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  poll().catch(() => {});
+}
+
+playerInput.addEventListener("change", applyPlayerFilter);
+playerInput.addEventListener("keydown", ev => {
+  if (ev.key === "Enter") applyPlayerFilter();
+});
+
+document.getElementById("retryAll").addEventListener("click", ev => {
+  const btn = ev.currentTarget;
+  if (!btn.disabled) startRetryAll(btn);
+});
+
+// Delegierte Listener: ueberleben jedes Neurendern der Zeilen. Die Knoepfe
+// stoppen die Propagation, damit der Klick nicht zusaetzlich den Report oeffnet.
+document.getElementById("rows").addEventListener("click", ev => {
+  const btn = ev.target.closest("button.retry");
+  if (btn) {
+    ev.stopPropagation();
+    if (!btn.disabled) startRetry(btn.dataset.id, btn);
+    return;
+  }
+  const fixBtn = ev.target.closest("button.fix");
+  if (fixBtn) {
+    ev.stopPropagation();
+    if (!fixBtn.disabled) startFix(fixBtn.dataset.id, fixBtn);
+    return;
+  }
+  const delBtn = ev.target.closest("button.del");
+  if (delBtn) {
+    ev.stopPropagation();
+    if (!delBtn.disabled) deleteGame(delBtn.dataset.id, delBtn);
+    return;
+  }
+  const row = ev.target.closest(".row");
+  if (row && row.dataset.url) window.open(row.dataset.url, "_blank", "noopener");
+});
+
+// --- Manuelles Nachladen per GameID ---------------------------------------
+// Deckungsgleich mit fetch._PLATFORM_ROUTING (app/postgame/fetch.py).
+const PLATFORMS = ["EUW1", "EUN1", "NA1", "KR", "BR1", "LA1", "LA2", "OC1",
+                   "TR1", "RU", "JP1", "PH2", "SG2", "TH2", "TW2", "VN2"];
+
+const loadPlatform = document.getElementById("loadPlatform");
+const loadGameId = document.getElementById("loadGameId");
+const loadBtn = document.getElementById("loadBtn");
+const loadErr = document.getElementById("loadErr");
+let loadTimer = null;
+
+loadPlatform.innerHTML = PLATFORMS.map(
+  p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+
+// `ok` faerbt die Meldung gruen (z.B. "liegt schon vollständig vor" - das ist
+// kein Fehler, sondern ein Link auf den fertigen Report).
+function loadMsg(text, html, ok) {
+  loadErr.hidden = !text && !html;
+  loadErr.className = ok ? "ok" : "err";
+  loadErr.innerHTML = html || esc(text || "");
+}
+
+function loadBusy(busy) {
+  loadBtn.disabled = busy;
+  loadBtn.innerHTML = busy ? "&#9203; lädt …" : "Laden";
+}
+
+// Ein Frisch-Load hinterlaesst bei einem Fehler KEINE Datei (und damit keine
+// History-Zeile) - der Zustand kommt darum ueber den eigenen Endpoint.
+async function pollLoad(matchId) {
+  loadTimer = null;
+  let state = null;
+  try {
+    const resp = await fetch(
+      `/api/history/load/${encodeURIComponent(matchId)}`);
+    state = (await resp.json()).state;
+  } catch (err) {
+    loadTimer = setTimeout(() => pollLoad(matchId), 4000);
+    return;
+  }
+  if (state === "done") {
+    loadBusy(false);
+    loadGameId.value = "";
+    loadMsg("");
+    load().catch(() => {});
+    return;
+  }
+  if (state && state.startsWith("failed:")) {
+    loadBusy(false);
+    loadMsg(`Laden fehlgeschlagen: ${state.slice(7)}`);
+    return;
+  }
+  loadTimer = setTimeout(() => pollLoad(matchId), 4000);
+}
+
+async function startLoad() {
+  loadMsg("");
+  loadBusy(true);
+  let data;
+  try {
+    const resp = await fetch("/api/history/load", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform: loadPlatform.value,
+                             game_id: loadGameId.value.trim() }),
+    });
+    data = await resp.json();
+  } catch (err) {
+    loadBusy(false);
+    loadMsg("Server nicht erreichbar.");
+    return;
+  }
+  if (!data.started) {
+    loadBusy(false);
+    loadMsg(data.reason || "Laden konnte nicht gestartet werden.",
+            data.url ? `${esc(data.reason || "Schon vorhanden.")}
+              <a href="${esc(data.url)}" target="_blank"
+                 rel="noopener">Report öffnen</a>` : null,
+            Boolean(data.url));
+    return;
+  }
+  if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
+  loadTimer = setTimeout(() => pollLoad(data.match_id), 4000);
+}
+
+loadBtn.addEventListener("click", () => { if (!loadBtn.disabled) startLoad(); });
+loadGameId.addEventListener("keydown", ev => {
+  if (ev.key === "Enter" && !loadBtn.disabled) startLoad();
+});
+
+// Erst-Ladung ohne Filter: welcher Spieler vorbelegt gehoert, verraet erst die
+// Antwort (`default_player` = die eigene Identitaet). Gibt es einen, wird er
+// EINMALIG uebernommen und gefiltert nachgeladen - danach gehoert der Wert dem
+// Nutzer, ein Wechsel auf ALL springt also nicht zurueck.
+async function boot() {
+  const data = await (await fetch("/api/history")).json();
+  if (!data.default_player) { render(data); return; }
+  playerFilter = data.default_player;
+  playerInput.value = data.default_player;
+  // Das ungefilterte Zwischenergebnis bleibt ungerendert - es waere nur ein
+  // Aufblitzen fremder Zeilen.
+  await load();
+}
+
+boot().catch(() => {
+  document.getElementById("summary").textContent =
+    "Server nicht erreichbar – läuft python -m app.server?";
+});
+</script>
+</body>
+</html>

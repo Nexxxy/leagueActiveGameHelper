@@ -4,6 +4,8 @@ Grievous-Wounds-Item als Option vor, wenn niemand im Team es traegt.
 Aus recommend.py ausgelagert (Struktur-Review 2026-07-17, Befund S2).
 """
 
+from core.ddragon import _simplify as _canon_champ
+
 from . import items, profiling
 from .rec_explain import _is_defensive_item, tag_fields
 
@@ -27,11 +29,54 @@ _ANTIHEAL_CHEAP = {"ad": "Executioner's Calling", "ap": "Oblivion Orb"}
 #   - 'Kayn' BLEIBT: heilt nur als Rhaast, aber die Live-API unterscheidet die
 #     Form nicht zuverlaessig. Der Fed-Trigger unten daempft Blue-Kayn-Fehlalarme
 #     (ein nicht-gefedeter Kayn loest keine Empfehlung mehr aus).
-_HEALING_THREATS = {
+#
+# OEFFENTLICH (KB-Dimension by_heal): die Liste ist seit der by_heal-Dimension
+# die EINE Quelle fuer Train (pipeline/aggregate.py zaehlt die Heal-Spiele) UND
+# Serve (engine/rec_context._enemy_heal_bucket). Darum ohne Unterstrich - eine
+# zweite, kopierte Liste in der Pipeline waere genau der Train/Serve-Skew, den
+# Review-Befund G verboten hat.
+HEALING_THREATS = {
     "Aatrox", "Swain", "Warwick", "Vladimir", "DrMundo", "Sylas", "Zac",
     "Briar", "Fiddlesticks", "Soraka", "Yuumi", "Nami", "Renata",
     "Ivern", "Kayn", "Illaoi", "Nasus", "Aurora",
 }
+
+# Ab so vielen Heilern im Gegnerteam gilt es als "heal-lastig" (KB-Bucket
+# `heal_heavy`). Nutzer-Entscheid 2026-08-08: EIN Bucket, kein Komplement - ein
+# "nicht heal-lastig"-Bucket waere nur das Marginal-Aggregat.
+HEAL_HEAVY_MIN = 2
+
+# Vereinfachte (lowercase, nur alnum) Schreibweisen der Liste - Vergleichsform
+# fuer `heal_bucket`. WARUM nicht der rohe Set-Check: die beiden Quellen, die den
+# Bucket bilden, schreiben denselben Champion NICHT gleich.
+#   - Serve: `champion_id` aus profiling ist bereits die kanonische DD-ID
+#     ("Fiddlesticks"), weil `verified_champion_id` gegen den DD-Katalog aufloest.
+#   - Train: der Matchindex legt Riots `championName` VERBATIM ab - und der ist
+#     bei Fiddlesticks "FiddleSticks" (grosses S). Ein roher Set-Check haette den
+#     Champion auf der Trainseite stumm verloren (1 von 18 Heilern), waehrend die
+#     Serveseite ihn zaehlt - genau der Train/Serve-Skew, den Review-Befund G
+#     verbietet. Dieselbe Casing-Falle wie Befund C (2026-07-13).
+# `_simplify` ist bewusst DIE Funktion, mit der `core.ddragon` seinen
+# Namens-Lookup baut (gleiche Praxis wie profiling.verified_champion_id) - so
+# gibt es keine zweite, leicht abweichende Kanonisierungsregel.
+_HEALING_CANON = frozenset(_canon_champ(c) for c in HEALING_THREATS)
+
+
+def heal_bucket(champion_ids) -> str | None:
+    """'heal_heavy' | None - Heal-Last eines Teams aus den Champion-Namen/-IDs.
+
+    DIE gemeinsame Bucket-Definition fuer Train und Serve (Muster
+    `champions.damage_bucket` fuer by_threat, Review-Befund G): die
+    pipeline-Aggregation zaehlt ihre `by_heal`-Zellen damit, und die Engine
+    fragt sie damit ab. Nur ein Bucket - unter HEAL_HEAVY_MIN Heilern gibt es
+    kein Signal, nicht das Gegenteil.
+
+    Akzeptiert jede Schreibweise der DD-ID (s. `_HEALING_CANON`); Anzeigenamen
+    mit anderem Wortstamm ('Wukong' fuer 'MonkeyKing') werden NICHT aufgeloest -
+    beide Aufrufer liefern DD-IDs."""
+    n = sum(1 for cid in champion_ids
+            if cid and _canon_champ(cid) in _HEALING_CANON)
+    return "heal_heavy" if n >= HEAL_HEAVY_MIN else None
 
 
 def _has_grievous(item_names) -> bool:
@@ -76,7 +121,7 @@ def _fed_healers(enemy_profiles: list[dict], game_time: float) -> list[dict]:
     (die per Definition fast immer wahr war). Ein normal farmender 0/0/0-Warwick
     triggert damit nicht mehr - im Zweifel gar nicht triggern."""
     return [e for e in enemy_profiles
-            if e.get("champion_id") in _HEALING_THREATS
+            if e.get("champion_id") in HEALING_THREATS
             and profiling.is_fed_enough(e, game_time)]
 
 

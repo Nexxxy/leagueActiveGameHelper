@@ -5,9 +5,11 @@ Aus recommend.py ausgelagert (Modul-Split, T3).
 """
 
 from . import items, knowledge, profiling
+from .rec_antiheal import _my_damage_type
 from .rec_context import _RecContext, _shrunk, _tag_role
 from .rec_explain import _is_defensive, tag_fields
 from .rec_path import _int_slot_dist
+from .rec_style import style_label
 from .rec_weights import CC_HEAVY_THRESHOLD, RANK_MIN_N, Weights
 
 
@@ -246,6 +248,69 @@ def _boots_cc_key(enemy_cc_score: float) -> str | None:
     return "cc_heavy" if enemy_cc_score >= CC_HEAVY_THRESHOLD else "cc_light"
 
 
+# --- Spielstil-Prior auf den Boots (plan_spielstil.md F1b/F6) ---------------
+# Der Regler fasst BEIDE Seiten an: Stufe 1-2 ziehen Resistenz-Boots vor,
+# Stufe 4-5 Offensiv-Boots passend zum EIGENEN Schadenstyp ("mit Garen kann man
+# auch Attackspeed-Boots kaufen"). Was "offensiv" heisst, kommt aus derselben
+# einen Tag-Taxonomie wie ueberall: AttackSpeed/LifeSteal (Berserker's,
+# Gluttonous) fuer AD, MagicPenetration (Sorcerer's) fuer AP.
+_STYLE_OFF_TAGS = {"ad": {"AttackSpeed", "LifeSteal"},
+                   "ap": {"MagicPenetration"}}
+
+
+def _style_boots_targets(ctx: _RecContext, options: list[dict],
+                         want: str | None) -> set[str]:
+    """Namen der Boots, die der Spielstil-Prior anschiebt - leer bei Tilt 0.
+
+    Defensive Seite (Tilt < 0): die Richtung kommt aus der Comp
+    (`_boots_defensive_want`); ohne Comp-Signal die HAEUFIGSTEN Resistenz-Boots
+    der Kombi - "irgendwas Tankiges" ist eine sinnvolle Ansage, "irgendwas
+    Tankiges, egal ob es hier jemand baut" nicht.
+
+    Aggressive Seite (Tilt > 0): Offensiv-Boots zum eigenen Schadenstyp."""
+    tilt = ctx.weights.style_tilt
+    if not tilt:
+        return set()
+    if tilt < 0:
+        if want:
+            return {b["item"] for b in options
+                    if _is_defensive(b["item"], want)}
+        res = [b for b in options
+               if items.tags_of(b["item"]) & {"Armor", "SpellBlock"}]
+        if not res:
+            return set()
+        return {max(res, key=lambda b: b.get("pick_rate") or 0.0)["item"]}
+    tags = _STYLE_OFF_TAGS[_my_damage_type(ctx.owned_ids, ctx.core_source)]
+    return {b["item"] for b in options if items.tags_of(b["item"]) & tags}
+
+
+def _style_boots_options(ctx: _RecContext, options: list[dict],
+                         targets: set[str]) -> tuple[list[dict], set[str]]:
+    """(Optionen, Prior-Ziele) - ergaenzt bei Tilt > 0 den kanonischen
+    Offensiv-Boot, wenn die KB-Liste keinen einzigen passenden fuehrt (F6,
+    Realfall Briar JUNGLE: Steelcaps/Mercs/Gluttonous, kein Berserker's).
+
+    Nur auf der aggressiven Seite und nur bei leerer Zielmenge - die defensive
+    Seite hat ihren kanonischen Fallback seit V2-03 im Comp-Hinweis, und ein
+    ergaenzter Kandidat ohne Nutzer-Vorgabe waere ein Vorschlag aus dem Nichts.
+    Der Eintrag traegt `pick_rate` 0 und ein eigenes Flag, damit der
+    Begruendungstext nicht "statistisch beste Boots (0 % Pick)" behauptet."""
+    tilt = ctx.weights.style_tilt
+    if tilt <= 0 or targets:
+        return options, targets
+    dmg = _my_damage_type(ctx.owned_ids, ctx.core_source)
+    name = items.standard_offensive_boots(dmg)
+    if not name or not items.is_valid_sr(name):
+        return options, targets
+    if any(b["item"] == name for b in options):
+        return options, targets
+    # ANHAENGEN, nie voranstellen: `options[0]` ist per Vertrag die
+    # meistgespielte Wahl (Alternative-Rec, Comp-Hinweis, Boots-Metrik).
+    return (list(options) + [{"item": name, "pick_rate": 0.0, "avg_slot": None,
+                              "style_fallback": True}],
+            {name})
+
+
 def _boots_scored(ctx: _RecContext, options: list[dict],
                   cells: dict) -> list[list]:
     """[[score, option, note], ...], absteigend - der Score-Modus der Boots-Wahl."""
@@ -265,6 +330,12 @@ def _boots_scored(ctx: _RecContext, options: list[dict],
         used.append(((cells.get("by_state") or {}).get(ctx.gold_state),
                      "wenn du vorne liegst" if ctx.gold_state == "ahead"
                      else "wenn du hinten liegst"))
+    # Spielstil-Regler: Zielmenge (und ggf. der ergaenzte Offensiv-Boot) VOR der
+    # Schleife, damit "kein passender Boot in der Liste" ueberhaupt feststellbar
+    # ist.
+    style_targets = _style_boots_targets(ctx, options, want)
+    options, style_targets = _style_boots_options(ctx, options, style_targets)
+    style_bonus = abs(w.style_tilt) * w.style_boots_cap
     rows: list[list] = []
     for opt in options:
         name = opt["item"]
@@ -284,6 +355,16 @@ def _boots_scored(ctx: _RecContext, options: list[dict],
         if want and _is_defensive(name, want):
             prior = w.boots_prior_cap
         score += f * prior
+        # Spielstil-Prior: bewusst NEBEN dem gemeinsamen Deckel der Regel-Priors
+        # und NICHT mit `boots_kb_factor` skaliert. Beide Daempfungen schuetzen
+        # die Champion-Statistik vor COMP-Signalen (Janna-Befund) - hier gibt
+        # aber der Spieler selbst die Richtung vor, und eine Nutzer-Vorgabe darf
+        # eine Mehrheitswahl ueberstimmen. Genau das ist der Zweck des Reglers.
+        if name in style_targets:
+            score += style_bonus
+            side = "Resistenz" if w.style_tilt < 0 else "Offensiv"
+            note += (f" - Spielstil {style_label(w.style_tilt)}: "
+                     f"{side}-Boots vorgezogen")
         rows.append([score, opt, note])
     rows.sort(key=lambda r: -r[0])
     return rows
@@ -342,10 +423,19 @@ def _boots_scored_recs(ctx: _RecContext, options: list[dict], *, cells: dict,
     popular = options[0]
     pick = chosen.get("pick_rate") or 0.0
     role = _tag_role(ctx)
-    lead = ("Meistgespielte Boots" if chosen["item"] == popular["item"]
-            else "Statistisch beste Boots in dieser Lage")
+    if chosen.get("style_fallback"):
+        # Kanonischer Offensiv-Boot ohne eigene Statistik (F6): "statistisch
+        # beste Boots (0 % Pick)" waere hier schlicht gelogen - der Text sagt
+        # stattdessen, woher der Kandidat kommt.
+        reason = (f"Spielstil {style_label(ctx.weights.style_tilt)}: "
+                  f"{chosen['item']} als Offensiv-Boots - {where} baut die "
+                  f"praktisch niemand, der Regler zieht sie trotzdem vor.")
+    else:
+        lead = ("Meistgespielte Boots" if chosen["item"] == popular["item"]
+                else "Statistisch beste Boots in dieser Lage")
+        reason = f"{lead} {where} ({pick:.0%} Pick){note}."
     rec = {"item": chosen["item"], "kind": "boots",
-           "reason": f"{lead} {where} ({pick:.0%} Pick){note}.",
+           "reason": reason,
            **tag_fields(chosen["item"], role=role),
            "avg_slot": chosen.get("avg_slot"),
            # Kauf-Timing (V2-02): Minuten-Quantile der Boots-Fertigstellung.

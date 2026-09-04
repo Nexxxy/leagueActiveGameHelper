@@ -200,8 +200,9 @@ def profile_player(player: dict, champion_id: str | None = None,
 THREAT_ASSIST_WEIGHT = 0.4
 
 
-def add_threat_scores(profiles: list[dict], priorities: dict[str, str]) -> None:
-    """Zwei entkoppelte Werte je Gegner (Fix 5.2):
+def add_threat_scores(profiles: list[dict], priorities: dict[str, str],
+                      game_time: float) -> None:
+    """Drei Werte je Gegner - zwei relative (Fix 5.2) und einer absolut:
 
     - `threat_score`: der ROHE, ungewichtete Bedrohungswert aus Gold (relativ
       zum reichsten Gegner) und kill-gewichteter KDA. Das ist der Wert, auf dem
@@ -209,10 +210,14 @@ def add_threat_scores(profiles: list[dict], priorities: dict[str, str]) -> None:
       Priority darf die Stance NICHT mehr verschieben.
     - `display_score`: derselbe Wert mal dem manuellen Priority-Faktor, nur fuer
       das Anzeige-Ranking der Threat-Karten (server sortiert danach).
-    - `threat_share`: prozentualer Anteil an der Team-Bedrohung (0..1),
-      normalisiert ueber alle Gegner auf Basis von `display_score` (also inkl.
-      Prio-Faktor - damit stimmen angezeigte Zahl und Karten-Sortierung
-      ueberein). Ein gefedeter Gegner dominiert, urgent-Prio hebt seinen Anteil.
+    - `threat_pct`: die ABSOLUTE Gefaehrlichkeit (0..1, keine Summe 1 ueber das
+      Team) aus der zeitabhaengigen Erwartung - siehe `absolute_threat`. Ebenfalls
+      mit dem Prio-Faktor multipliziert und auf 1.0 gedeckelt, damit angezeigte
+      Zahl und Karten-Sortierung dieselbe manuelle Gewichtung tragen.
+
+    `game_time` (Sekunden) ist Pflicht: die absolute Gefaehrlichkeit misst gegen
+    die zeitabhaengige Gold-/Item-Erwartung, ein stiller Default wuerde frueh
+    jeden Gegner als maximal gefaehrlich ausweisen.
     """
     max_gold = max((p["gold_spent"] for p in profiles), default=0) or 1
     for p in profiles:
@@ -227,13 +232,7 @@ def add_threat_scores(profiles: list[dict], priorities: dict[str, str]) -> None:
         p["priority"] = priorities.get(p["name"], "medium")
         p["threat_score"] = round(score, 2)
         p["display_score"] = round(min(score * weight, 1.0), 2)
-    # Anteil an der Team-Bedrohung (Anzeige): display_score normalisiert. Summe 0
-    # -> Gleichverteilung (1/n), leere Liste crasht nicht.
-    n = len(profiles)
-    total = sum(p["display_score"] for p in profiles)
-    for p in profiles:
-        share = (p["display_score"] / total) if total > 0 else (1.0 / n)
-        p["threat_share"] = round(share, 2)
+        p["threat_pct"] = round(min(absolute_threat(p, game_time) * weight, 1.0), 2)
 
 
 # --- Absolutes Fed-Signal (Review-Befund E/F, 2026-07-13) -----------------
@@ -334,6 +333,56 @@ def expected_items(game_time: float) -> float:
 def _net_kills(profile: dict) -> int:
     sc = profile.get("scores", {})
     return sc.get("kills", 0) - sc.get("deaths", 0)
+
+
+# --- Absolute Gefaehrlichkeit fuer die Anzeige (threat_pct) ----------------
+# Die Threat-Karte zeigt nicht mehr den ANTEIL an der Team-Bedrohung (Summe 100 %
+# ueber die fuenf Gegner - ein allein gefedeter Viego landete dort bei ~31 % und
+# wirkte harmloser als er ist), sondern eine ABSOLUTE Skala 0..100 %: gemessen
+# gegen dieselbe zeitabhaengige Erwartung wie das Fed-Signal. In einem
+# ausgeglichenen Spiel liegen alle Gegner im Mittelfeld (~35-50 %), klar
+# zurueckliegende darunter, ein stark gefedeter Gegner nahe 100 %.
+# Gold-Fenster: auf der Median-Kurve (Faktor 1.0) ergibt sich ~0.42, ab
+# THREAT_PCT_GOLD_HIGH ist die Komponente voll, ab THREAT_PCT_GOLD_LOW leer.
+THREAT_PCT_GOLD_LOW = 0.75
+THREAT_PCT_GOLD_HIGH = 1.35
+# Kill-Fenster: ausgeglichene Bilanz (0) ergibt 0.4, +6 ist voll, -4 ist leer.
+THREAT_PCT_KILL_OFFSET = 4.0
+THREAT_PCT_KILL_SPAN = 10.0
+# Item-Vorsprung nur als BONUS (kein Malus - fehlende Items schlagen schon ueber
+# das Gold durch): je fertigem Item ueber der Erwartung, gedeckelt.
+THREAT_PCT_ITEM_BONUS = 0.05
+THREAT_PCT_ITEM_BONUS_CAP = 0.15
+# Gewichte wie beim relativen threat_score (Gold vor Kill-Bilanz).
+THREAT_PCT_GOLD_WEIGHT = 0.55
+THREAT_PCT_KILL_WEIGHT = 0.45
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def absolute_threat(profile: dict, game_time: float) -> float:
+    """Absolute Gefaehrlichkeit eines Gegners (0..1, UNGERUNDET, ohne Prio).
+
+    Kein Anteilswert: die fuenf Gegner summieren sich NICHT auf 1. Basis ist die
+    zeitabhaengige Erwartung des Fed-Signals - Ausgabegold relativ zu
+    `expected_gold`, Netto-Kills und ein Bonus fuer fertige Items ueber
+    `expected_items`. Kalibriert so, dass ein `is_strongly_fed`-Gegner >= 0.85
+    liegt, ein Gegner auf der Kurve mit ausgeglichener Bilanz bei ~0.4 und ein
+    weit zurueckliegender bei ~0."""
+    exp = expected_gold(game_time)
+    gold_frac = profile.get("gold_spent", 0) / exp if exp > 0 else 0.0
+    span = THREAT_PCT_GOLD_HIGH - THREAT_PCT_GOLD_LOW
+    gold_part = _clamp01((gold_frac - THREAT_PCT_GOLD_LOW) / span)
+    kill_part = _clamp01((_net_kills(profile) + THREAT_PCT_KILL_OFFSET)
+                         / THREAT_PCT_KILL_SPAN)
+    item_lead = profile.get("completed_items", 0) - expected_items(game_time)
+    item_bonus = min(max(0.0, item_lead) * THREAT_PCT_ITEM_BONUS,
+                     THREAT_PCT_ITEM_BONUS_CAP)
+    return _clamp01(THREAT_PCT_GOLD_WEIGHT * gold_part
+                    + THREAT_PCT_KILL_WEIGHT * kill_part
+                    + item_bonus)
 
 
 def is_strongly_fed(profile: dict, game_time: float) -> bool:

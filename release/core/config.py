@@ -112,7 +112,6 @@ class Config:
     rate_limit_per_2min: int = 100
     focus_role: str = "JUNGLE"
     focus_champions: tuple = ()
-    focus_target_games: int = 200
     focus_min_mastery_level: int = 10  # Kandidaten mit weniger Mastery ausschliessen
     focus_pool_ttl_days: int = 90   # TTL fuer den patch-unabhaengigen Champion-Pool
     refresh_seconds: int = 60       # Frontend-Refresh-Intervall (app: in config.yml)
@@ -128,6 +127,14 @@ class Config:
     postgame_enrich_retries: int = 20   # Stufe-2-Versuche, bis Match indexiert ist
     postgame_enrich_backoff_seconds: int = 30  # Wartezeit zwischen den Versuchen
                                         # (Default 20x30 s ~ 10 min Gesamtbudget)
+    postgame_fairness: bool = True      # Fairness-Sektion (Raenge + Rollen-Wahl);
+                                        # false schaltet Sektion UND Calls ab
+    postgame_rank_ttl_hours: int = 12   # TTL des `ranks`-Caches (league-v4)
+    postgame_estimate_unranked: bool = True   # Peer-Schaetzung fuer Unranked
+    postgame_estimate_matches: int = 5  # Referenzspiele je unranked Spieler
+    postgame_estimate_budget_calls: int | None = None  # globaler Call-Deckel der
+                                        # Schaetzung; None = aus der Tiefe
+                                        # abgeleitet (s. fairness._budget_for)
     me: str = ""                    # eigene Identitaet: Riot-ID 'Name#Tag' ODER PUUID
     api_key: str = ""
     dev_api_key: str = ""
@@ -285,10 +292,34 @@ class Config:
                     "enrich_backoff_seconds", cfg.postgame_enrich_backoff_seconds)))
             except (TypeError, ValueError):
                 pass  # unbrauchbarer Wert -> Default (30 s) behalten
+            # Fairness-Sektion (Raenge + Rollen-Wahl je Rolle). `fairness: false`
+            # schaltet die Sektion inkl. ALLER league-v4/account-v1-Calls ab.
+            cfg.postgame_fairness = bool(postgame.get("fairness",
+                                                      cfg.postgame_fairness))
+            try:
+                cfg.postgame_rank_ttl_hours = max(0, int(postgame.get(
+                    "rank_ttl_hours", cfg.postgame_rank_ttl_hours)))
+            except (TypeError, ValueError):
+                pass  # unbrauchbarer Wert -> Default (12 h) behalten
+            cfg.postgame_estimate_unranked = bool(postgame.get(
+                "estimate_unranked", cfg.postgame_estimate_unranked))
+            try:
+                cfg.postgame_estimate_matches = max(1, int(postgame.get(
+                    "estimate_matches", cfg.postgame_estimate_matches)))
+            except (TypeError, ValueError):
+                pass  # unbrauchbarer Wert -> Default (5) behalten
+            # Nur ein EXPLIZIT gesetzter Deckel gewinnt; fehlt der Schluessel,
+            # bleibt None und das Budget waechst mit der Tiefe (sonst bremste
+            # der alte Fixwert 60 jede tiefere Suche aus).
+            if "estimate_budget_calls" in postgame:
+                try:
+                    cfg.postgame_estimate_budget_calls = max(
+                        0, int(postgame["estimate_budget_calls"]))
+                except (TypeError, ValueError):
+                    pass  # unbrauchbarer Wert -> abgeleitetes Budget behalten
             focus = data.get("focus", {})
             cfg.focus_role = normalize_role(focus.get("role", cfg.focus_role))
             cfg.focus_champions = tuple(focus.get("champions", []))
-            cfg.focus_target_games = focus.get("target_games", cfg.focus_target_games)
             cfg.focus_min_mastery_level = focus.get("min_mastery_level",
                                                     cfg.focus_min_mastery_level)
             cfg.focus_pool_ttl_days = focus.get("pool_ttl_days",

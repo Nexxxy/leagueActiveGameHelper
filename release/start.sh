@@ -55,6 +55,7 @@ if [ -n "$REAL_PID" ]; then
     echo "Server gestartet (PID $REAL_PID, Optionen: ${*:-keine})"
     echo "UI:  http://127.0.0.1:$PORT"
     echo "Log: server.log | Stoppen: ./kill.sh"
+    explorer.exe "http://127.0.0.1:$PORT" >/dev/null 2>&1 &
 else
     echo "Server-Start fehlgeschlagen - siehe server.log:"
     tail -n 3 server.log
