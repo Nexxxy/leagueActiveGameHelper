@@ -9,6 +9,15 @@
     --bg: #0f1319; --card: #1a2029; --border: #2a3342;
     --text: #dbe4f0; --muted: #8494ab; --accent: #4fc3f7;
     --aggressive: #ef7b66; --defensive: #64b5f6; --balanced: #9ccc65;
+    /* Vorsprung/Rueckstand in Gold-Differenzen. Bewusst EIGENE Token statt der
+       Stance-Farben: --aggressive ist lachsrot und gehoert dem Stance-Badge,
+       --minus ist ein warmes Orange, das neben dem Blau als "wir liegen hinten"
+       lesbar ist, ohne wie eine Fehlermeldung zu wirken. */
+    --plus: #64b5f6; --minus: #ffb74d;
+    /* "Gefuettert": derselbe Rotton wie die dringende Spike-Warnung
+       (.spike.high) - beides sagt "dieser Gegner ist JETZT das Problem", das
+       darf nicht in zwei Rottoenen erscheinen. */
+    --fed: #ff5252;
   }
   * { box-sizing: border-box; margin: 0; }
   body { background: var(--bg); color: var(--text);
@@ -27,6 +36,13 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .card { background: var(--card); border: 1px solid var(--border);
           border-radius: 10px; padding: 12px 14px; }
+  /* Du-Zeile: gedaempfter EINZEILER statt Ueberschrift + Karte. Der Block sagt
+     nichts, was die Empfehlung nicht schon weiss - er darf ihr deshalb keinen
+     Platz mehr wegnehmen. Bei langer Itemliste wird abgeschnitten statt
+     umzubrechen (eine zweite Zeile waere genau der Platz, der gespart werden
+     soll); der volle Text haengt im title. */
+  .meline { color: var(--muted); font-size: .85rem; margin-bottom: 2px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .stance { display: inline-block; padding: 2px 10px; border-radius: 20px;
             font-weight: 600; font-size: .8rem; color: #10141a; }
   .stance.aggressive { background: var(--aggressive); }
@@ -38,7 +54,18 @@
   #next .gold { font-variant-numeric: tabular-nums; font-weight: 600; }
   #next .gold.ok { color: var(--balanced); }
   #next .gold.missing { color: var(--aggressive); }
-  #next .swap { font-weight: 600; color: var(--aggressive); }
+  /* Tausch-Karte (X gegen Y): eine Zeile "Tausche [X] ▸ [Y]", die den normalen
+     Next-Inhalt ERSETZT. Sie erscheint erst, wenn alle sechs Slots final belegt
+     sind - vorher ist an dieser Stelle nichts anders (Nutzer-Entscheid
+     2026-09-05, "kein Vorgriff"). Eigener Flex-Kontext, damit die beiden Icons
+     mittig zu den Namen stehen; das Aussen-Layout von #next bleibt baseline. */
+  #next .swap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  #next .swaplabel { font-size: .72rem; font-weight: 700; text-transform: uppercase;
+                     letter-spacing: .06em; color: var(--muted); }
+  /* Das Opfer traegt die Warnfarbe, das Kauf-Item bleibt im Accent der Karte -
+     so ist ohne Lesen klar, welches der beiden Bilder verschwindet. */
+  #next .swap .sell { color: var(--aggressive); }
+  #next .swap .arrow { font-size: 1.25rem; font-weight: 700; color: var(--muted); }
   /* Kaufplan-Leiste (Feature 001): Icon-Schritte direkt unter dem Next-Block. */
   #plan { display: flex; align-items: center; gap: 4px; margin: 6px 0 2px;
           overflow-x: auto; padding: 2px 0 6px; }
@@ -175,9 +202,46 @@
   .spike { font-size: .78rem; font-weight: 600; color: var(--aggressive);
            margin: 2px 0; }
   .spike.high { color: #ff5252; }
+  /* Team-Gold-Zeile: Item-Gold-Differenz des Teams und je Rolle, EINE kompakte
+     Zeile ohne eigene Ueberschrift. Sie ordnet die Lage ein und ist kein
+     eigener Block - eine h2 wuerde ihr das Gewicht der Empfehlungsbloecke
+     geben. tabular-nums, damit die Zahlen zwischen zwei Refreshes nicht
+     seitlich springen. */
+  .teamgold { margin-top: 14px; font-size: .88rem;
+              font-variant-numeric: tabular-nums; }
+  .teamgold .cap { color: var(--muted); }
+  .teamgold .tgsep { color: var(--muted); margin: 0 8px; }
+  .teamgold .plus { color: var(--plus); font-weight: 600; }
+  .teamgold .minus { color: var(--minus); font-weight: 600; }
+  /* Gleichstand und fehlende Rolle sind KEINE Aussage - sie bleiben gedaempft,
+     damit die farbigen Zahlen die einzigen Blickfaenge der Zeile sind. */
+  .teamgold .zero { color: var(--muted); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
   .enemy .name { font-weight: 600; display: flex; justify-content: space-between; }
-  .enemy .profile { color: var(--accent); font-size: .8rem; }
+  /* K/D/A steht jetzt ausgeschrieben in der Zeile (die blosse KDA verriet nicht,
+     ob jemand gefuettert ist) - tabular-nums, damit die Karten zwischen zwei
+     Refreshes nicht seitlich zappeln. */
+  .enemy .profile { color: var(--accent); font-size: .8rem;
+                    font-variant-numeric: tabular-nums; }
+  /* Gefuetterter Gegner: die Karte selbst traegt den Akzent, damit man sie im
+     Raster findet, ohne jede Zahl zu lesen. Bewusst nur Rand + dezenter Schein -
+     eine eingefaerbte Karte wuerde die Prio-Auswahl darunter erschlagen. */
+  .enemy.fed { border-color: var(--fed);
+               box-shadow: 0 0 10px rgba(255, 82, 82, .35); }
+  .fedchip { display: inline-block; margin-right: 6px; padding: 1px 7px;
+             border-radius: 6px; background: var(--fed); color: #10141a;
+             font-size: .62rem; font-weight: 800; text-transform: uppercase;
+             letter-spacing: .06em; vertical-align: middle; }
+  /* Anti-Kandidaten: Chips im Stil der Stat-Badges (Outline in der defensiven
+     Farbe). Sie zeigen NUR, was ohnehin in der Empfehlungsliste steht - kein
+     zweites Ranking, deshalb kein gefuelltes Badge, das mit den Tags der Liste
+     um Aufmerksamkeit konkurrieren wuerde. */
+  .enemy .anti { margin-top: 6px; font-size: .78rem; }
+  .enemy .anti .cap { color: var(--muted); }
+  .antichip { display: inline-block; margin: 3px 3px 0 0; padding: 1px 7px;
+              border-radius: 6px; border: 1px solid var(--defensive);
+              color: var(--defensive); background: transparent;
+              font-size: .7rem; font-weight: 700; white-space: nowrap; }
   .bar { height: 6px; border-radius: 3px; background: #345; margin: 6px 0;
          overflow: hidden; display: flex; }
   .bar .ad { background: #ef7b66; height: 100%; }
@@ -185,7 +249,6 @@
   .threat { font-variant-numeric: tabular-nums; }
   select { background: var(--bg); color: var(--text); border: 1px solid var(--border);
            border-radius: 6px; padding: 2px 6px; margin-top: 6px; }
-  .itemlist { font-size: .78rem; color: var(--muted); margin-top: 6px; }
   #nogame { margin-top: 40px; text-align: center; color: var(--muted); }
   /* "Match-Report bereit"-Button (Endscreen): grosser, auffaelliger Link auf
      den fertigen Post-Game-Report. Wird nur ausserhalb des laufenden Spiels
@@ -285,8 +348,10 @@
   <div id="nogame" hidden>Kein aktives Spiel gefunden – warte auf Spielstart …</div>
 
   <div id="game" hidden>
-    <h2>Du</h2>
-    <div class="card" id="me"></div>
+    <!-- Du-Zeile: bewusst ohne Ueberschrift und ohne Karte. Alles Wesentliche
+         (Rolle, KDA, ausgegebenes Gold, Items) passt in eine Zeile; das volle
+         Profil steht ohnehin im YAML-Export. -->
+    <div id="me" class="meline"></div>
 
     <!-- Erklaerzeile zum Reglerstand (der Regler selbst sitzt in der Kopfzeile):
          bleibt hier im Inhalt, direkt ueber den Bloecken, deren Abweichung von
@@ -306,6 +371,11 @@
     <h2>Situational</h2>
     <div id="stanceline" style="margin-bottom:8px"></div>
     <div id="recs"></div>
+
+    <!-- Team-Gold: steht zwischen der Empfehlungsliste und den Gegnern, weil sie
+         genau dazwischen vermittelt - "wie steht mein Team gegen deren Team da"
+         ist die Bruecke von "was kaufe ich" zu "gegen wen". -->
+    <div id="teamgold" class="teamgold"></div>
 
     <h2>Gegner (nach Threat sortiert)</h2>
     <div class="grid" id="enemies"></div>
@@ -328,6 +398,27 @@ const PRIOS = ["low", "medium", "high", "urgent"];
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Gold-Zahlen ueberall mit Tausenderpunkt: "18350 G" war im Spiel, mit einem
+// Blick auf den zweiten Monitor, nicht als "18k" zu erfassen - die Ziffernzahl
+// musste man zaehlen. EIN Formatter fuer alle Stellen (Du-Zeile, Gegnerkarten,
+// Team-Gold), damit dieselbe Zahl nirgends anders aussieht.
+const GOLD_FMT = new Intl.NumberFormat("de-DE");
+
+function fmtGold(n) {
+  return Number.isFinite(n) ? GOLD_FMT.format(n) : String(n ?? "");
+}
+
+// Differenzen tragen IMMER ein Vorzeichen: ohne "+" liest sich "1.000" wie ein
+// Absolutwert, und die Richtung ist hier die ganze Aussage. Minus als echtes
+// U+2212 (Minuszeichen), weil der ASCII-Bindestrich neben Ziffern zu kurz und
+// zu tief sitzt. Kein Wert (Rolle auf einer Seite unbekannt) -> Gedankenstrich,
+// keine erfundene Null.
+function fmtDiff(n) {
+  if (!Number.isFinite(n)) return "–";
+  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+  return sign + fmtGold(Math.abs(n));   // EIN Formatweg fuer alle Gold-Zahlen
 }
 
 // Farbe des Zweck-Badges kommt aus der ACHSE (rec.tag_axis), nicht mehr aus dem
@@ -390,7 +481,13 @@ async function setPlaystyle(level) {
   refresh();
 }
 
-function enemyCard(e, spike) {
+// `deathChampion`: der Gegner aus dem Todes-Signal (nur der Champion-Fall) -
+// er bekommt dieselbe Anti-Zeile wie ein gefuetterter Gegner.
+//
+// Die Karte zeigt bewusst KEINE Itemliste des Gegners mehr: die Items stehen im
+// Spiel ohnehin im Scoreboard, auf der Karte kosteten sie nur Platz. Und keine
+// Todes-Zeile - was aus den Toden folgt, steht in der Anti-Zeile.
+function enemyCard(e, spike, deathChampion) {
   const ad = Math.round(e.damage_split.ad * 100);
   const ap = Math.round(e.damage_split.ap * 100);
   const opts = PRIOS.map(p =>
@@ -398,19 +495,56 @@ function enemyCard(e, spike) {
   const spikeLine = spike
     ? `<div class="spike ${spike.urgency}" title="Item-Vorsprung">⚡ ${spike.message}</div>`
     : "";
-  return `<div class="card enemy">
+  // Fed-Badge (F4a): EINE Quelle, naemlich das absolute Live-Kriterium des
+  // Servers (`is_strongly_fed` mit Hysterese) - keine zweite Schwelle hier.
+  // Defensiv gelesen: alte Payloads und die Demo kennen das Feld nicht.
+  const fed = !!e.fed_prev_strong;
+  const sc = e.scores || {};
+  // Anti-Zeile (F2a/A3): ANZEIGE-Regel, kein Ranking - genannt wird nur, was
+  // ohnehin schon in der Empfehlungsliste steht (Server: counter_items). Und
+  // nur auf den Karten, die es brauchen: gefuetterter Gegner oder der Champion,
+  // an dem man staendig stirbt. Ohne Kandidaten erscheint gar nichts.
+  const counters = e.counter_items || [];
+  const antiLine = (fed || e.name === deathChampion) && counters.length
+    ? `<div class="anti"><span class="cap">Gegen ihn in deiner Liste:</span>
+      ${counters.map(n => `<span class="antichip">${esc(n)}</span>`).join(" ")}</div>`
+    : "";
+  return `<div class="card enemy${fed ? " fed" : ""}">
     <div class="name"><span>${esc(e.name)}
       ${e.role ? `<span class="muted">${esc(e.role)}</span>` : ""}</span>
-      <span class="threat" title="Absolute Gefährlichkeit (Erwartung nach Spielzeit; inkl. deiner Prio)">⚠ ${e.threat_pct != null ? Math.round(e.threat_pct * 100) + " %" : e.threat_score}</span></div>
+      <span>${fed ? `<span class="fedchip" title="Deutlich vor der Erwartung – Gold und K/D/A">FED</span>` : ""}<span class="threat" title="Absolute Gefährlichkeit (Erwartung nach Spielzeit; inkl. deiner Prio)">⚠ ${e.threat_pct != null ? Math.round(e.threat_pct * 100) + " %" : e.threat_score}</span></span></div>
     ${spikeLine}
-    <div class="profile">${esc(e.build_profile)} · ${e.gold_spent} G · KDA ${e.kda}</div>
+    <div class="profile">${esc(e.build_profile)} · ${fmtGold(e.gold_spent)} G · ${esc(sc.kills ?? 0)}/${esc(sc.deaths ?? 0)}/${esc(sc.assists ?? 0)} · KDA ${esc(e.kda)}</div>
     <div class="bar"><div class="ad" style="width:${ad}%"></div>
                      <div class="ap" style="width:${ap}%"></div></div>
     <div class="muted">${ad}% AD / ${ap}% AP</div>
     <label class="muted">Prio:
       <select class="prio" data-champion="${esc(e.name)}">${opts}</select></label>
-    <div class="itemlist">${esc(e.items.join(", ")) || "keine Items"}</div>
+    ${antiLine}
   </div>`;
+}
+
+// --- Team-Gold-Zeile --------------------------------------------------------
+// Beschriftung und Reihenfolge folgen der Lane-Reihenfolge, wie man sie im
+// Spiel liest (Top -> Jungle -> Mid -> Support -> ADC), NICHT den API-Namen:
+// "MIDDLE"/"BOTTOM"/"UTILITY" sagt am Bildschirm niemand.
+const TEAMGOLD_ROLES = [["Top", "TOP"], ["Jungle", "JUNGLE"], ["Mid", "MIDDLE"],
+                        ["Support", "UTILITY"], ["ADC", "BOTTOM"]];
+
+// Gezeigt wird NUR die Differenz - die Absolutwerte beider Teams stehen zwar im
+// Payload (YAML-Nachvollziehbarkeit), sagen beim Kaufen aber nichts: relevant
+// ist, ob man vorne oder hinten liegt.
+function goldCell(label, v) {
+  const cls = v > 0 ? "plus" : v < 0 ? "minus" : "zero";
+  return `<span class="cap">${esc(label)}</span> <span class="${cls}">${fmtDiff(v)}</span>`;
+}
+
+function teamGoldLine(tg) {
+  if (!tg) return "";   // aeltere Payload ohne Feld -> leer statt "0" behaupten
+  const roles = tg.roles || {};
+  return [goldCell("Team", tg.diff)]
+    .concat(TEAMGOLD_ROLES.map(([label, key]) => goldCell(label, roles[key])))
+    .join(`<span class="tgsep">|</span>`);
 }
 
 function render(s) {
@@ -445,11 +579,18 @@ function render(s) {
   if (!game) return;
 
   const p = s.player, r = s.recommendations;
-  document.getElementById("me").innerHTML =
-    `<b>${p.name}</b> <span class="muted">${p.role}</span> ·
-     ${p.scores.kills}/${p.scores.deaths}/${p.scores.assists} ·
-     ${p.gold_spent} G ausgegeben
-     <div class="itemlist">${p.items.join(", ") || "keine Items"}</div>`;
+  // Du-Zeile als EIN Text: er wird escaped angezeigt UND roh in den title
+  // gelegt, weil die CSS-Ellipsis lange Itemlisten abschneidet - ohne title
+  // waere der abgeschnittene Teil verloren. `esc()` ueber den ganzen Satz deckt
+  // Name und Itemnamen ab (Apostroph-Champions wie Kha'Zix brachen die alte,
+  // ungeschuetzte Fassung).
+  const meLine = `DU: ${p.name} ${p.role}`
+    + ` · ${p.scores.kills}/${p.scores.deaths}/${p.scores.assists}`
+    + ` · ${fmtGold(p.gold_spent)} G ausgegeben`
+    + ` (${p.items.join(", ") || "keine Items"})`;
+  const meEl = document.getElementById("me");
+  meEl.innerHTML = esc(meLine);
+  meEl.title = meLine;
 
   // Reglerstand vom Server uebernehmen - ausser der Nutzer zieht gerade daran.
   const slider = document.getElementById("styleRange");
@@ -463,36 +604,84 @@ function render(s) {
   document.getElementById("styleNote").innerHTML =
     r.style_note ? esc(r.style_note) : "";
 
+  // Drei Zustaende an EINER Stelle (#next): Tausch-Karte, normale Next-Karte,
+  // reiner Hinweistext. Die Gold-Zahlen laufen hier ueberall durch `fmtGold` -
+  // "1.850 G" ist auf dem zweiten Monitor mit einem Blick zu erfassen, "1850 G"
+  // musste man ziffernweise lesen (derselbe Grund wie bei der Team-Gold-Zeile).
   const n = r.next;
+  const nextEl = document.getElementById("next");
   if (n) {
     const rest = n.cost_remaining !== undefined ? n.cost_remaining : n.cost;
     const price = rest < n.cost
-      ? `${rest} G (${n.cost} G, davon ${n.cost - rest} G durch Teilitems gedeckt)`
-      : `${n.cost} G`;
-    let gold = price;
-    if (n.current_gold !== undefined) {
-      const missing = rest - n.current_gold - (n.sell_value || 0);
-      gold = n.affordable
-        ? `<span class="gold ok">${price} – kaufbar (du hast ${n.current_gold} G${n.sell_value ? ` + ${n.sell_value} G aus dem Verkauf` : ""})</span>`
-        : `<span class="gold missing">${price} – es fehlen ${missing} G${n.sell_value ? ` (Verkauf von ${n.sell_item} eingerechnet)` : ""}</span>`;
+      ? `${fmtGold(rest)} G (${fmtGold(n.cost)} G, davon ${fmtGold(n.cost - rest)} G durch Teilitems gedeckt)`
+      : `${fmtGold(n.cost)} G`;
+    if (n.swap) {
+      // TAUSCH-ZUSTAND. Er kommt erst, wenn alle sechs Slots mit fertigen Items
+      // belegt sind; davor ist an dieser Stelle NICHTS Sichtbares anders - kein
+      // Verkaufshinweis, kein Tausch-Praefix, keine halbe Karte (Nutzer-Entscheid
+      // 2026-09-05, "kein Vorgriff"). Deshalb ERSETZT die Karte den Next-Inhalt,
+      // statt ihn zu ergaenzen: zu sehen ist genau eine Handlung, "verkauf X,
+      // kauf Y". Die Kaufplan-Leiste blendet sich ueber ihr eigenes Gate aus
+      // (purchase_plan ist in diesem Zustand null).
+      const swap = n.swap;
+      // Beide Seiten teilen sich EIN Icon-Markup - damit haengt der Tooltip
+      // (delegiert ueber [data-item-id]) an X und Y gleichermassen. Ohne Assets
+      // bleibt die Karte reine Textform, wie ueberall sonst.
+      const icon = (id) => (s.assets_available && id)
+        ? `<img class="iicon" data-item-id="${id}" src="assets/items/${id}.png" alt="" onerror="this.remove()">`
+        : "";
+      const swapCost = `${esc(n.item)} kostet ${fmtGold(rest)} G · Verkauf bringt ${fmtGold(swap.sell_value)} G`;
+      // `affordable` rechnet den Verkaufserloes bereits ein - die Zeile macht nur
+      // sichtbar, WORAUS sich das zusammenrechnet.
+      let gold = `<span class="gold">${swapCost}</span>`;
+      if (n.current_gold !== undefined) {
+        gold = n.affordable
+          ? `<span class="gold ok">${swapCost} · du hast ${fmtGold(n.current_gold)} G</span>`
+          : `<span class="gold missing">${swapCost} · du hast ${fmtGold(n.current_gold)} G –
+             es fehlen ${fmtGold(rest - n.current_gold - swap.sell_value)} G</span>`;
+      }
+      nextEl.innerHTML =
+        `<div class="swap"><span class="swaplabel">Tausche</span>
+           ${icon(swap.sell_item_id)}<span class="itemname sell">${esc(swap.sell_item)}</span>
+           <span class="arrow">▸</span>
+           ${icon(n.item_id)}<span class="itemname">${esc(n.item)}</span></div>
+         ${n.tag ? `<span class="${tagClass(n)}">${esc(n.tag)}</span>` : ""} ${statBadges(n)} ${gold}
+         <span class="muted">${esc(swap.reason)}</span>
+         <span class="muted">${esc(n.reason)}</span>`;
+    } else {
+      let gold = price;
+      if (n.slot_block) {
+        // Inventar voll, aber ein Teilitem/Consumable belegt den Slot: getauscht
+        // wird hier NICHT (der Spieler baut ja noch). Die Karte bleibt exakt wie
+        // sonst - ehrlich wird allein die Gold-Zeile, denn "kaufbar" waere sie
+        // nicht: der Slot fehlt, egal wie viel Gold da ist (affordable === false
+        // kommt so aus der Engine). Kein Badge, kein Praefix - siehe "kein
+        // Vorgriff" oben.
+        const when = n.slot_block.kind === "consumable" ? "genutzt" : "fertig gebaut";
+        const short = (n.current_gold !== undefined && rest > n.current_gold)
+          ? `es fehlen ${fmtGold(rest - n.current_gold)} G, ` : "";
+        gold = `<span class="gold missing">${price} – ${short}kaufbar,
+                sobald ${esc(n.slot_block.item)} ${when} ist</span>`;
+      } else if (n.current_gold !== undefined) {
+        gold = n.affordable
+          ? `<span class="gold ok">${price} – kaufbar (du hast ${fmtGold(n.current_gold)} G)</span>`
+          : `<span class="gold missing">${price} – es fehlen ${fmtGold(rest - n.current_gold)} G</span>`;
+      }
+      // `now_rel === 100` heisst: der naechste Kauf IST der staerkste Kandidat -
+      // und genau das ist die Regel, nicht die Ausnahme. Eine Anzeige dafuer waere
+      // reine Tautologie ("der Top-Vorschlag ist der Top-Vorschlag"), darum bleibt
+      // die Stelle leer. Ein ABWEICHENDER Wert kommt vor, wenn ein Timing-Gate
+      // (Boots-Gate, Defensiv-Zweig) den Pool-Sieger ueberholt; nur dann zeigt der
+      // Balken, wie stark dieser Kauf gegenueber der staerksten Karte der Liste ist.
+      const nrel = (n.now_rel != null && n.now_rel !== 100) ? relBar(n.now_rel) : "";
+      nextEl.innerHTML =
+        `${s.assets_available && n.item_id ? `<img class="iicon" data-item-id="${n.item_id}" src="assets/items/${n.item_id}.png" alt="" onerror="this.remove()">` : ""}
+         <span class="itemname">${n.item}</span>
+         ${n.tag ? `<span class="${tagClass(n)}">${n.tag}</span>` : ""} ${statBadges(n)} ${nrel} ${gold}
+         <span class="muted">${n.reason}</span>`;
     }
-    if (n.sell_item) {
-      gold = `<span class="swap">↺ ${n.sell_item} verkaufen</span> ${gold}`;
-    }
-    // `now_rel === 100` heisst: der naechste Kauf IST der staerkste Kandidat -
-    // und genau das ist die Regel, nicht die Ausnahme. Eine Anzeige dafuer waere
-    // reine Tautologie ("der Top-Vorschlag ist der Top-Vorschlag"), darum bleibt
-    // die Stelle leer. Ein ABWEICHENDER Wert kommt vor, wenn ein Timing-Gate
-    // (Boots-Gate, Defensiv-Zweig) den Pool-Sieger ueberholt; nur dann zeigt der
-    // Balken, wie stark dieser Kauf gegenueber der staerksten Karte der Liste ist.
-    const nrel = (n.now_rel != null && n.now_rel !== 100) ? relBar(n.now_rel) : "";
-    document.getElementById("next").innerHTML =
-      `${s.assets_available && n.item_id ? `<img class="iicon" data-item-id="${n.item_id}" src="assets/items/${n.item_id}.png" alt="" onerror="this.remove()">` : ""}
-       <span class="itemname">${n.item}</span>
-       ${n.tag ? `<span class="${tagClass(n)}">${n.tag}</span>` : ""} ${statBadges(n)} ${nrel} ${gold}
-       <span class="muted">${n.reason}</span>`;
   } else {
-    document.getElementById("next").innerHTML = r.note
+    nextEl.innerHTML = r.note
       ? `<span class="muted">${r.note}</span>`
       : '<span class="muted">Build komplett – nichts mehr offen.</span>';
   }
@@ -529,8 +718,7 @@ function render(s) {
   document.getElementById("stanceline").innerHTML =
     `<span class="stance ${r.stance}">${r.stance}</span>
      <span class="muted"> ${r.stance_reason}
-     (Datenbasis: ${r.knowledge_games} High-Elo-Spiele)</span>`
-    + (r.stance_note ? `<div class="muted" style="font-size:0.85em">${r.stance_note}</div>` : "");
+     (Datenbasis: ${r.knowledge_games} High-Elo-Spiele)</span>`;
 
   // Die Engine liefert items[] bereits gewichtet sortiert (Pool-Score) - hier
   // wird nur noch gefiltert und getrennt:
@@ -584,10 +772,16 @@ function render(s) {
           + 'Karten für spätere Käufe blendet die Liste aus.</div>'
         : '<div class="muted">Keine offenen Empfehlungen – Build komplett.</div>');
 
+  document.getElementById("teamgold").innerHTML = teamGoldLine(s.team_gold);
+
   const spikes = {};
   (r.spike_warnings || []).forEach(w => { spikes[w.name] = w; });
+  // Todes-Signal: NUR der Champion-Fall benennt einen Gegner (trigger
+  // "damage_type" sagt "AP-Schaden", das gehoert auf keine einzelne Karte).
+  const ds = r.death_signal;
+  const deathChampion = ds && ds.trigger === "champion" ? ds.champion : null;
   document.getElementById("enemies").innerHTML =
-    s.enemies.map(e => enemyCard(e, spikes[e.name])).join("");
+    s.enemies.map(e => enemyCard(e, spikes[e.name], deathChampion)).join("");
 }
 
 let REFRESH_MS = 60000;   // Default; der Server liefert app.refresh_seconds aus config.yml mit

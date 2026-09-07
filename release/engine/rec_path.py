@@ -110,6 +110,11 @@ def _slot_support(ctx: _RecContext, name: str,
     False, sobald der aktuelle Slot hinter dem Datenende des Items liegt - der
     Aufrufer wirft das Item dann aus dem Pool. Begruendung unten an der
     Stelle."""
+    if ctx.slot_neutral:
+        # Tausch-Bewertung (plan_slot_tausch.md F2): im Counterfactual ohne ein
+        # Inventar-Item gibt es keinen sinnvollen "aktuellen Kaufslot" - dort
+        # zaehlt allein der Situationswert, nicht der typische Kaufzeitpunkt.
+        return 1.0, True, True
     if ctx.cur_slot > ctx.slot_horizon:
         return 1.0, True, True
     f = ctx.weights.path_rescore_factor

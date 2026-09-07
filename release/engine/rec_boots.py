@@ -556,7 +556,11 @@ def _boots_pool_score(ctx: _RecContext, primary: dict) -> float | None:
     pick_total, merged = _boots_slot_merge(ctx.boots_options)
     if pick_total <= 0.0 or not merged:
         return None
-    if ctx.cur_slot > ctx.slot_horizon:
+    if ctx.slot_neutral or ctx.cur_slot > ctx.slot_horizon:
+        # `slot_neutral`: Counterfactual der Tausch-Bewertung (s. `_slot_support`).
+        # Die Boots MUESSEN dort dieselbe Behandlung bekommen wie die Item-
+        # Kandidaten - laeuft nur eine der beiden Seiten slot-gedaempft, waeren
+        # die Boots strukturell immer das billigere Opfer.
         return pick_total
     peak = max(merged.values()) or 1.0
     now = merged.get(ctx.cur_slot, 0.0)

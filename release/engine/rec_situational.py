@@ -1,5 +1,5 @@
-"""Situative Schicht: konditionale Layer (by_threat/by_state/by_partner/by_heal/
-by_keystone), Botlane-Partner-Glue, Behind-Situationals (V2-08), das Scoring des
+"""Situative Schicht: konditionale Layer (by_threat/by_state/by_partner/
+by_heal), Botlane-Partner-Glue, Behind-Situationals (V2-08), das Scoring des
 situativen Blocks und die Support-Item-Endwahl (Schicht 5).
 
 Aus recommend.py ausgelagert (Modul-Split, T4/T6).
@@ -34,8 +34,21 @@ def _conditional_layers(ctx: _RecContext) -> None:
     # `split`. Nur so werden die gelernten Zellen unter derselben Definition
     # abgefragt, unter der sie gezaehlt wurden; `split` bleibt fuer Boots-/
     # Defensiv-Texte unveraendert threat-gewichtet.
+    #
+    # MODUS-SCHALTER `threat_scale` (Default 0.0 = aus, Begruendung samt
+    # Messzahlen an der Weights-Definition): bei 0 wird die Zelle GAR NICHT
+    # erst geladen. Damit bleiben `threat_items`/`threat_base`/`bt` leer, und
+    # der Zweig in `_score_situationals` feuert weder den Zuschlag noch den
+    # Text ("... Win gegen AD-lastige Teams") - dieselbe Konstruktion wie bei
+    # `state_factor`, aus demselben Grund: ein blosser Cap 0 haette die
+    # Behauptung ohne Wirkung stehen gelassen. `ctx.enemy_bucket` selbst bleibt
+    # gesetzt (Serve-Definition): die Boots-Schicht liest ihn fuer ihre eigenen
+    # `boots_by_threat`-Zellen weiter, und die regelbasierten Sachtexte
+    # (`explain_item` ueber `split`/`top`) haengen ohnehin nicht an dieser
+    # Zelle.
     enemy_bucket = ctx.enemy_bucket
-    bt = kb.get("by_threat", {}).get(enemy_bucket) if enemy_bucket else None
+    bt = (kb.get("by_threat", {}).get(enemy_bucket)
+          if enemy_bucket and ctx.weights.threat_scale > 0.0 else None)
     # Volle Item-Dicts behalten (count/win_rate) + Basisrate des Buckets fuer
     # Shrinkage und Ranking-Gate. base_win_rate kann bei kuratierten Overrides
     # oder alter KB fehlen -> dann Kuratiert-Pfad (kein Gate, keine Shrinkage).
@@ -45,7 +58,17 @@ def _conditional_layers(ctx: _RecContext) -> None:
 
     # Gold-konditioniert (Task 10): liege ich klar vorne/hinten, zaehlt, was in
     # genau dieser Lage gewinnt (bias-korrigierte `edge` aus den Timelines).
-    bs = kb.get("by_state", {}).get(ctx.gold_state) if ctx.gold_state else None
+    #
+    # MODUS-SCHALTER `state_factor` (Default 0.0 = aus, Begruendung an der
+    # Weights-Definition): bei 0 wird die Zelle GAR NICHT erst geladen. Damit
+    # bleiben `state_items`/`state_base` leer, und der Zweig in
+    # `_score_situationals` feuert weder den Zuschlag noch den Text ("... wenn
+    # du vorne/hinten liegst") - genau der Punkt, an dem ein blosser Cap 0 die
+    # Behauptung ohne Zahl stehen gelassen haette. `ctx.gold_state` selbst
+    # bleibt gesetzt: Boots-Opposition, Verdikt und die Defensiv-Reserve
+    # (Kaufzaehlungen aus `by_state.behind`) lesen ihn unveraendert weiter.
+    bs = (kb.get("by_state", {}).get(ctx.gold_state)
+          if ctx.gold_state and ctx.weights.state_factor > 0.0 else None)
     ctx.state_items = {t["item"]: t for t in bs["items"]} if bs else {}
     ctx.state_base = bs.get("base_win_rate") if bs else None
 
@@ -76,19 +99,10 @@ def _conditional_layers(ctx: _RecContext) -> None:
     ctx.heal_items = {t["item"]: t for t in hl_data["items"]} if hl_data else {}
     ctx.heal_base = hl_data.get("base_win_rate") if hl_data else None
 
-    # Keystone-konditioniert (by_keystone): die eigene Hauptrune steht schon aus
-    # _build_context (None, solange die Schicht per keystone_factor aus ist).
-    # Nachgeschlagen wird mit str(Perk-ID) - so exportiert die Pipeline die
-    # Zellen-Schluessel (YAML kennt nur String-Keys).
-    ks_data = (knowledge.keystone_cells(ctx.cid, ctx.used_role)
-               .get(str(ctx.keystone_id)) if ctx.keystone_id else None)
-    ctx.keystone_items = {t["item"]: t for t in ks_data["items"]} if ks_data else {}
-    ctx.keystone_base = ks_data.get("base_win_rate") if ks_data else None
-
     # Konfidenz-Gate pro KOMBI: unterhalb von CONF_RICH_MIN sind die konditionalen
-    # Schichten (by_threat/by_state/by_partner/by_heal/by_keystone) zu duenn - gar
-    # nicht erst anwenden (kein Score-Schub, kein "Win gegen"-Text), statt still
-    # zu verrauschen. Der Core-Pfad, Stance und Archetyp-Wahl bleiben unberuehrt.
+    # Schichten (by_threat/by_state/by_partner/by_heal) zu duenn - gar nicht erst
+    # anwenden (kein Score-Schub, kein "Win gegen"-Text), statt still zu
+    # verrauschen. Der Core-Pfad, Stance und Archetyp-Wahl bleiben unberuehrt.
     if ctx.confidence != "rich":
         ctx.threat_items, ctx.state_items = {}, {}
         ctx.threat_base = ctx.state_base = None
@@ -96,8 +110,6 @@ def _conditional_layers(ctx: _RecContext) -> None:
         ctx.partner_base = None
         ctx.heal_items = {}
         ctx.heal_base = None
-        ctx.keystone_items = {}
-        ctx.keystone_base = None
 
     # Klassen-Fallback (Review Befund 4.3): bei nicht-`rich` Kombis die situativen
     # Kandidaten um Items aus dem Klassen-Aggregat ERGAENZEN (z.B. AD-Fighter
@@ -509,6 +521,13 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
         # (Faktor != 1) - auf einem HP-Hybrid mit Achse 0 waere er eine
         # Behauptung ohne Wirkung.
         extra += style_reason_suffix(weights.style_tilt, style_mult)
+        # Gegnerschaden-konditioniert (by_threat): der Modus-Schalter
+        # `threat_scale` greift an ZWEI Stellen - hier skaliert er den Zuschlag
+        # (0.8 = Verhalten vor dem Schalter, Cap unveraendert darueber). Das AUS
+        # erledigt `_conditional_layers`: bei Faktor 0 bleibt `threat_items`
+        # leer, dieser Block wird also gar nicht erst betreten, und mit dem
+        # Zuschlag verschwindet auch der Text - ohne ihn hier ein zweites Mal zu
+        # bedingen (identisch zu by_state).
         if name in threat_items:
             t = threat_items[name]
             n = t.get("count")
@@ -530,6 +549,13 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
                 extra += (f" - {t['win_rate']:.0%} Win gegen "
                           f"{enemy_bucket.upper()}-lastige Teams (n={n})")
             # n < RANK_MIN_N: Signal komplett stumm (kein Schub, kein Text).
+        # Lage-konditioniert (by_state): der Modus-Schalter `state_factor`
+        # greift an ZWEI Stellen, und das ist Absicht. Hier skaliert er den
+        # Zuschlag (1.0 = Verhalten vor dem Schalter, Cap unveraendert
+        # darueber). Das AUS erledigt dagegen `_conditional_layers`: bei
+        # Faktor 0 bleibt `state_items` leer, dieser Block wird also gar nicht
+        # betreten - nur so verschwindet mit dem Zuschlag auch der Text, ohne
+        # ihn hier ein zweites Mal zu bedingen.
         if name in state_items:
             t = state_items[name]
             n = t.get("count")
@@ -537,12 +563,15 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
             if n is None or state_base is None:
                 # KURATIERT: rohe edge wie bisher, kein Gate.
                 score += max(-weights.state_cap,
-                             min(weights.state_cap, t.get("edge", 0.0)))
+                             min(weights.state_cap,
+                                 weights.state_factor * t.get("edge", 0.0)))
                 extra += f" - ueberdurchschnittlich, wenn du {lage} liegst"
             elif n >= RANK_MIN_N:
                 # edge neu aus geschrumpfter Item-Win-Rate minus Basisrate.
                 wr = _shrunk(t["win_rate"], n, state_base)
-                score += max(-weights.state_cap, min(weights.state_cap, wr - state_base))
+                score += max(-weights.state_cap,
+                             min(weights.state_cap,
+                                 weights.state_factor * (wr - state_base)))
                 extra += f" - {t['win_rate']:.0%} Win, wenn du {lage} liegst (n={n})"
             # n < RANK_MIN_N: Signal stumm.
         # Partner-konditioniert (by_partner, Phase 2): NUR bei UTILITY + rich +
@@ -587,32 +616,6 @@ def _score_situationals(ctx: _RecContext, recs: list[dict]) -> None:
                     weights.heal_cap, weights.heal_factor * (wr - ctx.heal_base)))
                 extra += (f" - {t['win_rate']:.0%} Win gegen Heal-lastige Teams "
                           f"(2+ Heiler, n={n})")
-            # n < RANK_MIN_N: Signal stumm.
-        # Keystone-konditioniert (by_keystone): NUR bei bekannter eigener
-        # Hauptrune + rich + aktiver Schicht (keystone_factor > 0; bei 0 ist
-        # ctx.keystone_items leer, weil die Rune gar nicht in den Kontext kam).
-        # Mechanik exakt wie by_threat: Shrinkage + RANK_MIN_N-Zellgate + Cap.
-        if name in ctx.keystone_items:
-            t = ctx.keystone_items[name]
-            n = t.get("count")
-            # Anzeigename der Rune nur, wenn eine Quelle ihn mitgeliefert hat
-            # (Live-API `displayName`) - es gibt bewusst keinen Runen-Static, aus
-            # dem er nachgeschlagen wuerde. Sonst neutral: die Perk-ID im Text
-            # waere fuer den Spieler wertlos.
-            rune = ctx.keystone_name or "deiner Hauptrune"
-            if n is None or ctx.keystone_base is None:
-                # Kuratiert (Override/alte Zelle ohne count/base): kein Gate,
-                # keine Shrinkage - Roh-Win-Rate gegen 0.5.
-                score += max(-weights.keystone_cap, min(
-                    weights.keystone_cap,
-                    weights.keystone_factor * (t["win_rate"] - 0.5)))
-                extra += f" - {t['win_rate']:.0%} Win mit {rune}"
-            elif n >= RANK_MIN_N:
-                wr = _shrunk(t["win_rate"], n, ctx.keystone_base)
-                score += max(-weights.keystone_cap, min(
-                    weights.keystone_cap,
-                    weights.keystone_factor * (wr - ctx.keystone_base)))
-                extra += f" - {t['win_rate']:.0%} Win mit {rune} (n={n})"
             # n < RANK_MIN_N: Signal stumm.
         vs = "ad" if split["ad"] >= split["ap"] else "ap"
         defensive = _is_defensive(name, vs)

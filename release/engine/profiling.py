@@ -6,6 +6,8 @@ Klassifikation (tank/crit_dps/burst_ad/burst_ap/hybrid) und Threat-Score.
 
 from functools import lru_cache
 
+from core.config import VALID_ROLES
+
 from . import champions, items
 
 PRIORITY_WEIGHT = {"low": 0.5, "medium": 1.0, "high": 1.5, "urgent": 2.0}
@@ -438,6 +440,39 @@ def is_fed_enough(profile: dict, game_time: float) -> bool:
 def any_strongly_fed(profiles: list[dict], game_time: float) -> bool:
     """True, wenn mindestens ein Gegner absolut stark fed ist (Stance)."""
     return any(is_strongly_fed(p, game_time) for p in profiles)
+
+
+def _gold_sum(profiles: list[dict]) -> int:
+    return int(sum(p.get("gold_spent", 0) for p in profiles))
+
+
+def team_gold(team: list[dict], enemies: list[dict]) -> dict:
+    """Item-Gold-Gegenueberstellung beider Teams (Gold-Zeile der Live-Ansicht).
+
+    Gemessen wird EXAKT dieselbe Groesse wie im frueheren `team_lead` des
+    Stance-Satzes: `gold_spent` der Profile, also die Summe der
+    Data-Dragon-`gold.total` aller Inventar-Items (Consumables eingeschlossen,
+    gebanktes Gold NICHT - die Bank der Gegner ist ueber die Live Client Data
+    API unbeobachtbar). Neu ist nur die Darstellung: ungerundete Zahlen statt
+    "Team +1.7k" im Fliesstext, dazu die Aufschluesselung je Rolle.
+
+    `diff` = team - enemy (positiv = das eigene Team liegt vorne). `roles`
+    traegt je Rolle aus `VALID_ROLES` dieselbe Differenz, gebildet aus der
+    SUMME aller Spieler dieser Rolle je Seite: die Live-API liefert keine
+    Positionen, die Rollen werden geraten (Scoreboard-Reihenfolge, Smite,
+    KB-Fallback) und koennen sich doppeln - summieren laesst dabei keinen
+    Spieler unter den Tisch fallen. Fehlt die Rolle auf EINER Seite ganz
+    (Blind Pick, nicht erkannte Rolle), ist die Differenz nicht bildbar und der
+    Wert `None`; eine 0 waere dort eine Aussage, die die Daten nicht hergeben.
+    """
+    team_total, enemy_total = _gold_sum(team), _gold_sum(enemies)
+    roles: dict[str, int | None] = {}
+    for role in VALID_ROLES:
+        mine = [p for p in team if p.get("role") == role]
+        theirs = [p for p in enemies if p.get("role") == role]
+        roles[role] = (_gold_sum(mine) - _gold_sum(theirs)) if mine and theirs else None
+    return {"team": team_total, "enemy": enemy_total,
+            "diff": team_total - enemy_total, "roles": roles}
 
 
 def team_damage_split(profiles: list[dict]) -> dict:

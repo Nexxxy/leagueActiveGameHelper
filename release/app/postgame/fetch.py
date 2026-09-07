@@ -80,6 +80,23 @@ def _make_client(cfg: Config, keys, platform: str, routing: str) -> RiotClient:
                       cfg.rate_limit_per_sec, cfg.rate_limit_per_2min)
 
 
+# Primary-Key-Tupel, die Riot in DIESEM Prozess schon abgelehnt hat. Ein
+# Report baut mehrere `_FallbackClient` (Match-Fetch, Timeline-Fetch, Fairness);
+# ohne diese Merkliste startete jeder erneut mit dem laengst toten Dev-Key,
+# lief in dessen Ablehnung und protokollierte denselben Fallback ein weiteres
+# Mal. Ein ERNEUERTER Dev-Key ist ein anderer String und damit ein anderes
+# Tupel - der geht wieder den normalen Weg, die Merkliste sperrt ihn nicht aus.
+_REJECTED_PRIMARY: set[tuple[str, ...]] = set()
+
+
+def reset_rejected_primary() -> None:
+    """Merkliste der abgelehnten Primary-Keys leeren (nur fuer Tests).
+
+    Sie ist prozessweit: ohne Reset truege ein Test den Fallback eines anderen
+    mit sich herum."""
+    _REJECTED_PRIMARY.clear()
+
+
 class _FallbackClient:
     """RiotClient-Proxy fuer Postgame-Fetches: strikter Dev-Key-Vorrang mit
     einmaligem Fallback auf den `api_key`.
@@ -102,18 +119,34 @@ class _FallbackClient:
     Nur von RiotClient-Methodenaufrufen ausgeloeste SystemExit ('Alle API-Keys
     abgelehnt') triggert den Fallback; die SystemExit der fetch-Logik selbst
     (z. B. 'Match nicht abrufbar') laufen ausserhalb der proxierten Aufrufe und
-    bleiben unberuehrt."""
+    bleiben unberuehrt.
+
+    Ein einmal abgelehntes Primary-Tupel landet in der prozessweiten Merkliste
+    `_REJECTED_PRIMARY`: jeder WEITERE Proxy desselben Laufs startet dann
+    sofort mit den Fallback-Keys. Das spart nicht nur die Wiederholung des
+    toten Calls - es haelt vor allem die Key-Identitaet sauber, an der der
+    PUUID-Cache der Fairness-Sektion haengt (s. `fairness.key_identity`)."""
 
     def __init__(self, make, primary_keys, fallback_keys, log=print):
         self._make = make                         # keys(tuple) -> RiotClient
+        self._primary_keys = tuple(primary_keys)
         self._fallback_keys = tuple(fallback_keys)
         self._log = log
-        self._client = make(primary_keys)
+        if self._fallback_keys and self._primary_keys in _REJECTED_PRIMARY:
+            # Schon abgelehnt (anderer Proxy desselben Laufs) - den toten Key
+            # gar nicht erst anfassen.
+            self._log("[postgame] dev_api_key in diesem Lauf bereits abgelehnt "
+                      "- direkt api_key")
+            self._client = make(self._fallback_keys)
+            self._exhausted = True
+            return
+        self._client = make(self._primary_keys)
         # Kein Fallback moeglich/noetig -> Proxy ist schon "durchgereicht".
         self._exhausted = not self._fallback_keys
 
     def _fall_back(self) -> None:
         self._log("[postgame] dev_api_key abgelehnt - Fallback auf api_key")
+        _REJECTED_PRIMARY.add(self._primary_keys)
         self._client = self._make(self._fallback_keys)
         self._exhausted = True
 

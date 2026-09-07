@@ -278,6 +278,63 @@ def tag_fields(name: str, role: str | None = None) -> dict:
             "stats": _stat_badges(name)}
 
 
+# Ab welchem Anteil ein Schadenstyp die Anti-Auswahl allein bestimmt. Darunter
+# gilt der Gegner als gemischt und BEIDE Resistenzen zaehlen (60/40 ist noch
+# kein "reiner AP-Gegner").
+COUNTER_SHARE = 0.6
+
+
+def counter_items(recs: list[dict], damage_split: dict) -> list[str]:
+    """ANZEIGE-ONLY: welche Items der SICHTBAREN Empfehlungsliste gegen genau
+    diesen Gegner helfen - Namen in Listenreihenfolge.
+
+    WARUM eine Anzeige-Regel und keine Score-Schicht (Nutzer-Entscheid
+    2026-09-06/07): die Analyse der Lage-/Fed-Hypothese fand keinen Zusammenhang
+    zwischen gefuettertem Gegner und dem Kaufverhalten der Vorbilder. Die Liste
+    bleibt deshalb unveraendert - hier wird NUR benannt, was ohnehin schon
+    drinsteht: kein Ranking, keine neue Empfehlung, kein Nachladen von Items,
+    die die Liste nicht kennt.
+
+    `recs`: die Empfehlungs-Dicts (`recommendations.items`) mit `item`,
+    `tag_axis` und `stats`. `damage_split`: `{"ad": .., "ap": ..}` des Gegners.
+
+    Kandidat ist ein Item mit dem passenden Defensiv-Badge aus `_STAT_BADGES` -
+    Ruestung ab `COUNTER_SHARE` AD, MR ab `COUNTER_SHARE` AP, bei gemischtem
+    Schaden zaehlt beides - und der Achse `def` ODER `hybrid`.
+
+    WARUM das BADGE das Kriterium ist und nicht die Achse: gegen einen
+    gefuetterten AD-Gegner ist Zhonya's Hourglass fuer Gwen genau der Kauf, den
+    der Nutzer sehen will - das Item traegt "+Ruestung", steht aber wegen seines
+    Schadens-Tags auf der Achse `hybrid`. Ein Achsen-Filter auf `def` allein
+    haette die Zeile bei Schadens-Champions praktisch immer leer gelassen. Die
+    Achse bleibt als Absicherung: ein reines `off`-Item traegt ohnehin kein
+    Defensiv-Badge.
+
+    Items ohne `stats` (Consumables, alte Payloads) fallen durch, Namen bleiben
+    eindeutig. Nichts Passendes -> leere Liste (A3: das Frontend zeigt dann gar
+    nichts, keine "keine Optionen"-Meldung).
+    """
+    split = damage_split or {}
+    ad = split.get("ad") or 0
+    ap = split.get("ap") or 0
+    if ad >= COUNTER_SHARE:
+        wanted = {_STAT_BADGES["Armor"]}
+    elif ap >= COUNTER_SHARE:
+        wanted = {_STAT_BADGES["SpellBlock"]}
+    else:
+        wanted = {_STAT_BADGES["Armor"], _STAT_BADGES["SpellBlock"]}
+    out: list[str] = []
+    for rec in recs or []:
+        if rec.get("tag_axis") not in ("def", "hybrid"):
+            continue
+        if not wanted & set(rec.get("stats") or []):
+            continue
+        name = rec.get("item")
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def _is_defensive(item_name: str, vs: str) -> bool:
     """vs: 'ad' oder 'ap' - passt das Item gegen diesen Schadenstyp?
 

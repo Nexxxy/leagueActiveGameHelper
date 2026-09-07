@@ -89,6 +89,17 @@ class RiotClient:
         # desselben Clients gedacht; im Projekt hat jede Region ihren eigenen
         # Client in ihrem eigenen Thread.
         self.last_status: int | None = None
+        # Der Key, der zuletzt tatsaechlich GEANTWORTET hat (None, solange noch
+        # keine Antwort kam).
+        # WOFUER: Cache-Identitaet der Fairness-Sektion. PUUIDs sind an die
+        # Key-FAMILIE gebunden (alle Dev-Keys eines Accounts teilen sie, der
+        # Haupt-Key hat eigene) - der PUUID-Cache muss deshalb nach dem Key
+        # gekeyt sein, der die Antwort geliefert hat, nicht nach dem beim
+        # Anlegen konfigurierten. Der Unterschied ist real: `_FallbackClient`
+        # (app/postgame/fetch.py) startet mit dem `dev_api_key` und schaltet
+        # erst beim ERSTEN abgelehnten Call auf den `api_key` um - `_keys[0]`
+        # ist bis dahin der ggf. laengst tote Dev-Key.
+        self.last_key: str | None = None
 
     # ---- Round-Robin ---------------------------------------------------
 
@@ -182,6 +193,11 @@ class RiotClient:
         reine Verbindungsfehler). Nur darueber laesst sich ein 400 von einem 404
         unterscheiden, weil beide als None zurueckkommen.
 
+        `self.last_key` traegt dazu den Key, der diese Antwort geliefert hat -
+        gesetzt bei jedem Status ausser 401/403 (nur die lehnen den KEY ab).
+        Wer key-gebundene Daten cacht, muss nach diesem Key keyen, nicht nach
+        dem konfigurierten (s. Attribut-Kommentar in `__init__`).
+
         Bewusst ALLE Statuscodes >= 500 (nicht nur 500/502/503/504) als
         transient behandeln: Riot laeuft hinter Cloudflare, das eigene
         5xx-Codes liefert (520/521/522/524). Die wurden frueher bis
@@ -210,6 +226,12 @@ class RiotClient:
                 time.sleep(3 * (attempt + 1))
                 continue
             self.last_status = resp.status_code
+            if resp.status_code not in (401, 403):
+                # Alles ausser einer Key-Ablehnung heisst: DIESER Key hat
+                # geantwortet (200 ebenso wie 429, 400/404 oder 5xx - die sagen
+                # etwas ueber Anfrage bzw. Server, nicht ueber den Key). Damit
+                # steht fest, welcher Key die Antwort erzeugt hat, s. `last_key`.
+                self.last_key = self._keys[key_idx]
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code == 429:

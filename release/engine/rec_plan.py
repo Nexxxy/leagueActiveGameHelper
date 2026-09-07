@@ -17,8 +17,7 @@ from .rec_path import _core_pick, _current_slot
 from .rec_situational import (
     _conditional_layers, _score_situationals, _support_final,
 )
-
-ITEM_SLOTS = 6  # regulaere Slots; Boots und Trinket haben eigene Slots
+from .rec_swap import ITEM_SLOTS, _slot_blocked, _slot_blocker
 
 
 def _elixir_next(owned_ids: list[int], current_gold: int | None,
@@ -60,8 +59,9 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
     Solange NOCH KEIN fertiges Item im Inventar ist, gilt davor ein hartes Gate
     (s. `boots_first`): fertige Boots nur, wenn die gelernte `slot_dist` sie als
     Erstkauf ausweist und das gelernte Kauf-Timing erreicht ist.
-    Ist das Inventar voll (6 regulaere Slots), wird ein Item-Tausch
-    vorgeschlagen statt eines unkaufbaren siebten Items.
+    Ist das Inventar voll (6 regulaere Slots), bleibt der Kauf stehen, wird aber
+    als blockiert markiert (`slot_block`, s. unten). Ob daraus ein TAUSCH wird,
+    entscheidet `rec_swap._swap_offer` - `_pick_next` weiss davon nichts.
 
     Die `stance` steuert hier NUR noch die aggressive Abweichung (Damage-Spike
     vor Boots, wenn man vorne liegt) - sie kommt aus der ANZEIGE-Stance. Der
@@ -158,26 +158,25 @@ def _pick_next(recs: list[dict], stance: str, owned_names: set[str],
               "reason": why_now + pick["reason"], "cost": cost,
               "cost_remaining": cost_remaining}
 
-    # Volles Inventar: Ein Kauf ohne Rezept-Ueberschneidung braucht einen
-    # freien Slot (Boots nicht - eigener Slot). Dann Item-Tausch vorschlagen;
-    # billigstes Slot-Item zuerst, das trifft automatisch Pots/Wards.
-    sell_value = 0
-    needs_slot = (pick["kind"] != "boots"
-                  and items.build_discount(pick["item"], owned_ids) == 0)
-    blocking = items.slot_items(owned_ids, role=slot_role)
-    if needs_slot and len(blocking) >= ITEM_SLOTS:
-        _, victim = min(blocking,
-                        key=lambda pair: pair[1].get("gold", {}).get("total", 0))
-        sell_value = victim.get("gold", {}).get("sell", 0)
-        result["sell_item"] = victim["name"]
-        result["sell_value"] = sell_value
-        result["reason"] = (f"Inventar voll ({ITEM_SLOTS}/{ITEM_SLOTS}) - "
-                            f"Tausch noetig: {victim['name']} verkaufen "
-                            f"(+{sell_value} G). ") + result["reason"]
+    # Volles Inventar: Ein Kauf ohne Rezept-Ueberschneidung braucht einen freien
+    # Slot (Boots nicht - eigener Slot). Haelt noch ein Teilitem oder ein
+    # Consumable diesen Slot, aendert das an der EMPFEHLUNG nichts - der Spieler
+    # baut gerade fertig, und "verkauf etwas" waere der falsche Rat (kein
+    # Vorgriff, plan_slot_tausch.md §1). Ehrlich wird allein die Gold-Zeile:
+    # `slot_block` nennt den Blocker, und kaufbar ist der Kauf so oder so nicht.
+    # Sind alle sechs Slots FINAL belegt, gibt es keinen Blocker zu nennen -
+    # dann uebernimmt `rec_swap._swap_offer` (Tausch oder Notiz).
+    blocker = None
+    if _slot_blocked(pick, owned_ids, slot_role):
+        blocker = _slot_blocker(owned_ids, slot_role)
+        if blocker:
+            result["slot_block"] = blocker
 
     if current_gold is not None:
         result["current_gold"] = int(current_gold)
-        result["affordable"] = current_gold + sell_value >= cost_remaining
+        # Bei blockiertem Slot ist "kaufbar" unabhaengig vom Gold gelogen.
+        result["affordable"] = (blocker is None
+                                and current_gold >= cost_remaining)
     return result
 
 
@@ -279,7 +278,12 @@ def _second_next_pick(ctx: _RecContext, next_pick: dict) -> dict | None:
     Ruft NUR die Phasen-Helfer (kein `_purchase_plan`/`_assemble_result`) -> keine
     Rekursion. `_conditional_layers` weist seine ctx-Felder neu zu (keine In-place-
     Mutation), darum ist die `replace`-Kopie gegen Kontamination des Original-ctx
-    sicher; KB/Quellen werden unveraendert wiederverwendet (kein Neuladen)."""
+    sicher; KB/Quellen werden unveraendert wiederverwendet (kein Neuladen).
+
+    Endet am sechsten Slot (A9, plan_slot_tausch.md): braucht B nach dem Kauf des
+    Next-Items einen Slot, den es nicht mehr gibt, kommt B NICHT in die Leiste -
+    auch nicht als Ausblick. Sonst stuende in der Timeline ein Kauf, der nur per
+    Tausch ginge, waehrend der Tausch selbst noch gar nicht angeboten wird."""
     name = next_pick.get("item")
     entry = items.by_name().get(name) if name else None
     if not entry:
@@ -304,11 +308,15 @@ def _second_next_pick(ctx: _RecContext, next_pick: dict) -> dict | None:
     _conditional_layers(ctx2)
     recs2 += _boots_class(ctx2)
     _score_situationals(ctx2, recs2)
-    return _pick_next(recs2, ctx2.stance, owned2_names, ctx2.game_time,
-                      ctx2.current_gold, owned2_ids, role=_tag_role(ctx2),
-                      slot_role=ctx2.role or ctx2.used_role,
-                      next_block=ctx2.path_block,
-                      path_first=_path_winner(ctx2, recs2))
+    slot_role = ctx2.role or ctx2.used_role
+    pick2 = _pick_next(recs2, ctx2.stance, owned2_names, ctx2.game_time,
+                       ctx2.current_gold, owned2_ids, role=_tag_role(ctx2),
+                       slot_role=slot_role,
+                       next_block=ctx2.path_block,
+                       path_first=_path_winner(ctx2, recs2))
+    if pick2 and _slot_blocked(pick2, owned2_ids, slot_role):
+        return None
+    return pick2
 
 
 def _purchase_plan(ctx: _RecContext, recs: list[dict], next_pick: dict | None,

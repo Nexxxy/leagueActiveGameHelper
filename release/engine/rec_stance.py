@@ -23,9 +23,6 @@ LEAD_GOLD = 1000
 # angeglichen (pipeline.aggregate.GOLD_LEAD = 1500). Nur so wird live derselbe
 # Zustand abgefragt, unter dem die by_state-Zellen gezaehlt wurden.
 STATE_LEAD_GOLD = 1500
-# Ab so viel gebanktem Gold zusaetzlich ein klarer Hinweis, es beim naechsten
-# Reset auszugeben (gehortetes Gold arbeitet nicht).
-BANK_NOTE_GOLD = 1200
 # Geschaetzte Gegner-Bank fuer earned_lead: die Bank der Gegner ist ueber die
 # Live Client Data API unbeobachtbar - eine kleine feste Schaetzung.
 OPP_BANK_EST = 700
@@ -71,47 +68,15 @@ def earned_lead(my_gold_spent: int, current_gold: int | None,
     return int(my_earned - opp_earned)
 
 
-def _k(gold: float) -> str:
-    """Kompakte k-Darstellung eines Gold-Betrags (Bestandsstil: 1.3k)."""
-    return f"{gold / 1000:.1f}k"
-
-
-def lead_note(lead: int | None, opp: dict | None,
-              team_lead: int | None, current_gold: int | None) -> str:
-    """Anzeige-Note im Bestandsstil, z.B.:
-      ' Items: -1.8k hinter Sylas | Team +1.7k | 1.3k auf der Bank'
-    Der Gegenpart wird beim CHAMPION-Namen genannt. Team-Kontext = Item-Gold des
-    eigenen Teams minus Gegnerteam (None -> weggelassen). Bank = eigenes
-    currentGold gerundet; ab BANK_NOTE_GOLD zusaetzlich der Reset-Hinweis. Leerer
-    String ohne erkannten Gegenpart (fuehrendes Leerzeichen, wenn gefuellt, damit
-    sie sich direkt an den Stance-Satz anschliesst)."""
-    if lead is None or opp is None:
-        return ""
-    name = opp.get("name", "Gegenpart")
-    if lead <= -LEAD_GOLD:
-        items_txt = f"-{_k(abs(lead))} hinter {name}"
-    elif lead >= LEAD_GOLD:
-        items_txt = f"+{_k(lead)} vor {name}"
-    else:
-        items_txt = f"gleichauf mit {name}"
-    parts = [f"Items: {items_txt}"]
-    if team_lead is not None:
-        sign = "+" if team_lead >= 0 else "-"
-        parts.append(f"Team {sign}{_k(abs(team_lead))}")
-    bank = int(round(current_gold)) if current_gold is not None else 0
-    if bank >= 100:
-        parts.append(f"{_k(bank)} auf der Bank")
-    note = " | ".join(parts)
-    if current_gold is not None and current_gold >= BANK_NOTE_GOLD:
-        note += " - beim naechsten Reset ausgeben"
-    return " " + note
-
-
 def own_stance(my_scores: dict, enemy_fed: bool,
-               lead: int | None = None, note: str = "") -> tuple[str, str]:
-    """`lead` ist der fielded_lead (gemessenes Item-Gold vs. Gegenpart). `note`
-    ist die vorgefertigte Items/Team/Bank-Zeile (lead_note), die an die
-    Begruendung angehaengt wird - im Test-/Backtest-Pfad leer.
+               lead: int | None = None) -> tuple[str, str]:
+    """`lead` ist der fielded_lead (gemessenes Item-Gold vs. Gegenpart).
+
+    Die Begruendung endet mit dem Lage-Satz - die fruehere angehaengte
+    Items/Team/Bank-Zeile (`lead_note`) ist entfallen: Team- und
+    Rollen-Differenz stehen jetzt als eigene Gold-Zeile im Frontend
+    (`profiling.team_gold`), die Bank in der Gold-Zeile des Next-Items. Der
+    Fliesstext wiederholte damit nur, was daneben schon in Zahlen steht.
 
     `enemy_fed`: ist ein Gegner ABSOLUT stark fed (profiling.is_strongly_fed)?
     Ersetzt den frueheren relativen top_threat>=0.8-Trigger (Review-Befund E):
@@ -153,20 +118,4 @@ def own_stance(my_scores: dict, enemy_fed: bool,
         stance, reason = "defensive", "Ein Gegner ist stark fed - halte Abstand, bis dein Build aufholt."
     else:
         stance, reason = "balanced", "Ausgeglichenes Spiel - Standard-Build weiterziehen."
-    return stance, reason + note
-
-
-def _stance_note(stance: str) -> str:
-    """Zusatz-Hinweis, warum die Item-Empfehlung trotz defensiver Stance NICHT
-    defensiv vorzieht. Nur bei defensiver Stance (Befund H,
-    review-2026-07-15.md / Befund D, 2026-07-13); sonst leer, damit das Frontend
-    per Falsy-Check rendern kann.
-
-    Seit der Entfernung der Stance-Score-Schicht (Testsuite-Review 2026-08-04)
-    gibt es keinen zweiten Modus mehr, in dem defensiv vorgezogen wuerde - die
-    Note haengt darum nur noch an der Stance selbst."""
-    if stance == "defensive":
-        return ("Die Item-Empfehlung folgt bewusst weiter der gelernten "
-                "High-Elo-Reihenfolge - defensives Vorziehen hat im Backtest "
-                "auch bei Rueckstand nicht haeufiger gewonnen.")
-    return ""
+    return stance, reason

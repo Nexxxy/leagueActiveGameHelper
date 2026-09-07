@@ -181,6 +181,13 @@ class _RecContext:
     slot_dist: dict = field(default_factory=dict)
     slot_horizon: int = 0
     cur_slot: int = 1
+    # Slot-Schicht abschalten (plan_slot_tausch.md F2). Nur die
+    # Counterfactual-Laeufe der Tausch-Bewertung (`rec_swap._counterfactual`)
+    # setzen das: dort ist der "aktuelle Kaufslot" eine Fiktion - das Inventar
+    # hat gerade ein Loch, das der Spieler nie hatte. Gefragt ist der
+    # Situationswert eines Items, nicht sein typischer Kaufzeitpunkt. Explizit
+    # als Feld statt ueber den impliziten Trick "cur_slot > slot_horizon".
+    slot_neutral: bool = False
     exclusive: list = field(default_factory=list)
     path_scores: dict = field(default_factory=dict)
     path_block: frozenset = frozenset()
@@ -208,17 +215,6 @@ class _RecContext:
     heal_bucket: str | None = None
     heal_items: dict = field(default_factory=dict)
     heal_base: float | None = None
-    # Keystone-konditioniert (by_keystone) - `keystone_id`/`keystone_name` setzt
-    # _build_context (nur bei weights.keystone_factor > 0), die Items/Basisrate
-    # kommen aus _conditional_layers. `keystone_id` ist die Perk-ID der EIGENEN
-    # Hauptrune, `keystone_name` ihr Anzeigename NUR wenn eine Quelle ihn
-    # mitliefert (die Live-API tut das, Backtest/Demo nicht) - ohne Namen
-    # formuliert der Begruendungstext neutral. Es gibt bewusst KEINEN
-    # Runen-Static, aus dem der Name nachgeschlagen wuerde.
-    keystone_id: int | None = None
-    keystone_name: str | None = None
-    keystone_items: dict = field(default_factory=dict)
-    keystone_base: float | None = None
     # Klassen-Fallback - von _conditional_layers gefuellt
     lookup_role: str = ""
     class_bucket: str | None = None

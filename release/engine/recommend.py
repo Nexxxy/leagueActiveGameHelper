@@ -43,7 +43,7 @@ from .rec_context import (  # noqa: F401  Fassade, Modul-Split T1
 )
 from .rec_stance import (  # noqa: F401  Fassade, Struktur-Review 2026-07-17 T2
     STATE_LEAD_GOLD,
-    fielded_lead, earned_lead, lead_note, own_stance, _stance_note,
+    fielded_lead, earned_lead, own_stance,
 )
 from .rec_archetype import _select_archetype  # noqa: F401  Fassade (T2)
 from .rec_explain import (  # noqa: F401  Fassade, Struktur-Review 2026-07-17 T2
@@ -85,6 +85,10 @@ from .rec_plan import (  # noqa: F401  Fassade, Modul-Split T6
     _next_unit, _order_components, _pick_next, _purchase_plan,
     _second_next_pick, _support_upgrade_step,
 )
+from .rec_swap import (  # noqa: F401  Fassade, Slot-Tausch (plan_slot_tausch.md)
+    NOTE_MIN_GOLD, NOTE_NO_GAIN, SWAP_MIN_GOLD, _needs_slot, _slot_blocked,
+    _slot_blocker, _slot_final, _swap_gate_open, _swap_offer,
+)
 
 
 def _build_context(champion: str, role: str | None, owned_names: set[str],
@@ -93,11 +97,8 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
                    owned_ids: list[int] | None, my_level: int,
                    ally_items: set[str] | None, weights: Weights,
                    champion_id: str | None,
-                   ally_gold_spent: int | None = None,
                    bot_partner: dict | None = None,
-                   death_signal: dict | None = None,
-                   my_keystone_id: int | None = None,
-                   my_keystone_name: str | None = None) -> _RecContext:
+                   death_signal: dict | None = None) -> _RecContext:
     """Phase 1 (Befund S1): KB-/Kontext-Aufbau - Rolle, Threat, Split, CC, Lead,
     Stance, Archetyp. Baut das _RecContext-Objekt fuer die folgenden Phasen."""
     # Stabile Data-Dragon-ID fuer alle internen Lookups (Fix 5.7): KB, Klassen-
@@ -122,14 +123,6 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
     # Bucket gar nicht erst gebildet, dann bleibt der Layer restlos stumm.
     heal_bucket = (_enemy_heal_bucket(enemy_profiles)
                    if weights.heal_factor > 0.0 else None)
-    # Eigene Hauptrune (by_keystone): die einzige Dimension, die auf etwas am
-    # SPIELER SELBST konditioniert, nicht auf die Gegner-Comp. Bei
-    # abgeschalteter Schicht (keystone_factor == 0, Default bis zum Gate) wird
-    # die Rune gar nicht uebernommen - dann bleibt der Layer restlos stumm, egal
-    # was der Aufrufer liefert. Fehlt sie (alte Dumps, Demo, Backtest ohne
-    # Perks), ist sie None und die Schicht bleibt ebenso stumm.
-    keystone_id = (my_keystone_id if weights.keystone_factor > 0.0 else None)
-    keystone_name = my_keystone_name if keystone_id else None
     # Gemessenes Item-Gold des eigenen Spielers (identisch zur profiling-Metrik:
     # Summe gold.total des Inventars). Basis fuer beide Vorspruenge.
     my_gold_spent = items.categorize_gold(owned_ids or [])["gold_total"]
@@ -137,19 +130,11 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
     f_lead, opp = fielded_lead(my_gold_spent, used_role, enemy_profiles)
     # (B) getrennte Schaetzung des VERDIENTEN Golds fuer gold_state (KB-by_state).
     e_lead = earned_lead(my_gold_spent, current_gold, opp)
-    # Team-Kontext fuer die Anzeige-Note: Item-Gold des eigenen Teams (ich +
-    # Mitspieler) minus Gegnerteam. Ohne Mitspieler-Gold (Backtest) weggelassen.
-    if ally_gold_spent is None:
-        team_lead = None
-    else:
-        enemy_gold = sum(e.get("gold_spent", 0) for e in enemy_profiles)
-        team_lead = int(my_gold_spent + ally_gold_spent - enemy_gold)
-    note = lead_note(f_lead, opp, team_lead, current_gold)
     # Absolutes Fed-Signal (Review-Befund E): Stance kippt nur noch auf defensiv,
     # wenn ein Gegner GEMESSEN an der Spielzeit stark fed ist - nicht schon, weil
     # er relativ der reichste Gegner ist.
     enemy_fed = profiling.any_strongly_fed(enemy_profiles, game_time)
-    stance, stance_reason = own_stance(my_scores, enemy_fed, f_lead, note)
+    stance, stance_reason = own_stance(my_scores, enemy_fed, f_lead)
 
     # Build-Archetyp anhand der bereits gekauften Items waehlen (Kernstueck A).
     # Ohne "builds" (Alt-Schema) faellt es auf die globalen core/situational
@@ -209,7 +194,6 @@ def _build_context(champion: str, role: str | None, owned_names: set[str],
         bot_partner=bot_partner, death_signal=death_signal,
         kb=kb, top=top, split=split, enemy_cc_score=enemy_cc_score,
         enemy_bucket=enemy_bucket, heal_bucket=heal_bucket,
-        keystone_id=keystone_id, keystone_name=keystone_name,
         fielded_lead=f_lead, earned_lead=e_lead,
         gold_state=gold_state, stance=stance, stance_reason=stance_reason,
         build=build, build_reason=build_reason, core_source=core_source,
@@ -242,6 +226,18 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
                            slot_role=ctx.role or ctx.used_role,
                            next_block=ctx.path_block,
                            path_first=_path_winner(ctx, recs))
+    # Slot-Tausch (plan_slot_tausch.md): NACH der Kauf-Wahl. Der Tausch aendert
+    # nicht, WAS gekauft wird - er beantwortet die Anschlussfrage "wofuer macht
+    # es Platz?", und zwar erst, wenn alle sechs Slots final belegt sind.
+    swap, swap_note = _swap_offer(ctx, next_pick)
+    if swap:
+        next_pick["swap"] = swap
+        if ctx.current_gold is not None:
+            # Der Verkaufserloes zaehlt zum verfuegbaren Gold - sonst stuende auf
+            # der Tausch-Karte "es fehlen N G", obwohl der Tausch tragbar ist.
+            next_pick["affordable"] = (
+                ctx.current_gold + swap["sell_value"]
+                >= next_pick.get("cost_remaining", 0))
     # Anzeige-Regel "nur plausible naechste Kaeufe" (plan_next_item_only.md):
     # AB HIER arbeitet alles Weitere auf der gefilterten Menge. Bewusst NACH
     # `_pick_next`: die Kaufreihenfolge entscheidet unveraendert auf allen
@@ -256,14 +252,6 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
         "role": ctx.used_role,
         "stance": ctx.stance,
         "stance_reason": ctx.stance_reason,
-        # Klarstellung, dass die Item-Empfehlung trotz defensiver Stance der
-        # gelernten Kaufreihenfolge folgt (Befund H, review-2026-07-15.md /
-        # Befund D, 2026-07-13). Leer, wenn die Stance nicht defensiv ist - und
-        # bei aktivem Spielstil-Regler, weil ihre Aussage ("folgt bewusst weiter
-        # der gelernten High-Elo-Reihenfolge") dann schlicht falsch waere. An
-        # ihre Stelle tritt die `style_note`.
-        "stance_note": ("" if ctx.weights.style_tilt
-                        else _stance_note(ctx.stance)),
         # Spielstil-Regler (plan_spielstil.md): Echo des Tilts fuer YAML-Export
         # und Nachvollziehbarkeit, plus der erklaerende Satz (leer bei 0).
         "style_tilt": ctx.weights.style_tilt,
@@ -280,11 +268,16 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
         "build_reason": ctx.build_reason,
         "builds_available": [b["name"] for b in kb.get("builds", [])],
         "antiheal": antiheal,
-        "next": next_pick,
+        # Gate offen, aber kein Tausch (A2): das Next-Item entfaellt, die `note`
+        # tritt an seine Stelle. `items[]` bleibt in JEDEM Zustand die
+        # gewichtete Kandidatenliste (A8) - nur das Next-Feld wechselt.
+        "next": None if swap_note else next_pick,
         # Kaufplan-Leiste (Feature 001): flache Schritt-Liste unter dem Next-Item.
         # Das zweite grosse Item entsteht aus einer erneuten Empfehlung mit dem
         # Next-Item als 'besessen' (loest u.a. Passive-Kollisionen sauber auf).
-        "purchase_plan": _purchase_plan(
+        # Im Tausch-Zustand faellt sie weg (F4): die Tausch-Karte IST der Plan,
+        # ein zweites Item braeuchte einen zweiten Verkauf.
+        "purchase_plan": None if (swap or swap_note) else _purchase_plan(
             ctx, recs, next_pick,
             second_pick=(_second_next_pick(ctx, next_pick)
                          if next_pick and next_pick.get("kind") != "consumable"
@@ -300,6 +293,11 @@ def _assemble_result(ctx: _RecContext, recs: list[dict],
     # der Listenposition unabhaengig - die Umsortierung darf sie also nicht
     # mehr sehen. Es sind dieselben Dicts, nur neu geordnet.
     result["items"] = _display_order(ctx, recs)
+    if swap_note:
+        # Steht an der Stelle des Next-Items im Frontend - der Spieler soll
+        # sehen, WARUM dort nichts steht, statt "Build komplett" zu lesen und
+        # sich zu fragen, wohin sein Gold soll.
+        result["note"] = swap_note
     # Aktiver Klassen-Fallback? (mind. ein Klassen-Item in den Empfehlungen)
     class_used = any(r.get("source") == "class" for r in recs)
     if ctx.confidence == "basic":
@@ -336,24 +334,15 @@ def recommend(champion: str, role: str | None, owned_names: set[str],
               ally_items: set[str] | None = None,
               weights: Weights = DEFAULT_WEIGHTS,
               champion_id: str | None = None,
-              ally_gold_spent: int | None = None,
               bot_partner: dict | None = None,
-              death_signal: dict | None = None,
-              my_keystone_id: int | None = None,
-              my_keystone_name: str | None = None) -> dict:
+              death_signal: dict | None = None) -> dict:
     """Orchestrator (Struktur-Review 2026-07-17 T3, Befund S1): baut den Kontext
     auf und ruft die Phasen-Helfer in fester Reihenfolge - Core-Pick, Boots
     (KB- und Klassen-Pfad), konditionale Schichten, situatives Scoring,
-    Anti-Heal, Result-Assembly. Die eigentliche Logik liegt in den _*-Helfern.
-
-    `my_keystone_id`/`my_keystone_name`: Perk-ID und (optional) Anzeigename der
-    EIGENEN Hauptrune fuer die by_keystone-Schicht. Beide optional und
-    None-sicher - Aufrufer ohne Runen-Wissen (Demo, alte Live-Dumps, Backtest
-    ohne Perks) verhalten sich exakt wie vorher."""
+    Anti-Heal, Result-Assembly. Die eigentliche Logik liegt in den _*-Helfern."""
     ctx = _build_context(champion, role, owned_names, my_scores, enemy_profiles,
                          game_time, current_gold, owned_ids, my_level, ally_items,
-                         weights, champion_id, ally_gold_spent, bot_partner,
-                         death_signal, my_keystone_id, my_keystone_name)
+                         weights, champion_id, bot_partner, death_signal)
     recs: list[dict] = []
     # 1. Naechstes Core-Item
     _core_pick(ctx, recs)

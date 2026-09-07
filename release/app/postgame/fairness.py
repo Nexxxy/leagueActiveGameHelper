@@ -12,16 +12,34 @@ keine Peers), fehlt nur sein Beitrag, nie die ganze Sektion:
    budgetiert und sichtbar als Schaetzung gekennzeichnet (`estimate_rank`).
 
 **Identitaets-Regel (bindend, aus dem Spike am realen Spiel):** PUUIDs sind
-**pro API-Key verschluesselt**. Dieselbe Person traegt unter dem `dev_api_key`
-eine andere PUUID als unter dem `api_key` - und der Roh-Cache der Pipeline
-enthaelt die PUUIDs desjenigen Keys, der das Match geholt hat. Eine PUUID aus
-einem GECACHTEN Match gegen account-v1/league-v4 zu halten endet darum in
-HTTP 400. Jeder Weg nach draussen startet deshalb bei der **Riot-ID**
+**pro Key-FAMILIE verschluesselt**. Dieselbe Person traegt unter dem
+`dev_api_key` eine andere PUUID als unter dem `api_key` - und der Roh-Cache der
+Pipeline enthaelt die PUUIDs desjenigen Keys, der das Match geholt hat. Eine
+PUUID aus einem GECACHTEN Match gegen account-v1/league-v4 zu halten endet darum
+in HTTP 400. Jeder Weg nach draussen startet deshalb bei der **Riot-ID**
 (`riotIdGameName#riotIdTagline`, key-unabhaengig) und loest sie mit DEMSELBEN
 Client auf, der danach fragt; der PUUID-Cache ist entsprechend nach
 (Key-Identitaet, Riot-ID) gekeyt. Einzige Ausnahme: ein Match, das wir in
 diesem Lauf SELBST geholt haben - dessen PUUIDs gehoeren unserem Key und sind
 direkt verwendbar (halbiert die Kosten der Peer-Schaetzung).
+
+Drei Praezisierungen, die ein realer Fall (abgelaufener Dev-Key) erzwungen hat:
+
+- **Familie, nicht String.** Am Cache beobachtet: an drei Tagen ERNEUERTE
+  Dev-Keys liefern identische PUUIDs, der Haupt-Key voellig andere. Die
+  Verschluesselung haengt also an der Key-Familie (Dev-App vs. Haupt-Key). Der
+  Fingerabdruck ueber den Key-String bleibt trotzdem die Identitaet: er trennt
+  garantiert richtig; ein erneuerter Dev-Key kostet nur einen Cache-Miss.
+- **Der Key, der GEANTWORTET hat.** Identitaet ist `client.last_key`, nicht der
+  beim Anlegen konfigurierte Key. `fetch._FallbackClient` startet mit dem
+  `dev_api_key` und schaltet erst beim ersten abgelehnten Call auf den `api_key`
+  um - eine beim Anlegen eingefrorene Identitaet schriebe die Antworten des
+  Haupt-Keys unter die Dev-Kennung (und laese die Dev-Altbestaende als
+  vermeintlich passend wieder hoch).
+- **Key-Wechsel mitten im Abruf.** Faellt der Proxy waehrend eines Lookups um,
+  gehoert die eben benutzte PUUID noch zum alten Key und Riot quittiert sie mit
+  HTTP 400. `rank_by_riot_id` loest die Riot-ID dann genau EINMAL unter der
+  neuen Identitaet neu auf.
 
 Aus derselben Regel folgt: Dedup und Lobby-Ausschluss der Peer-Auswahl laufen
 ueber die volle Riot-ID (case-insensitiv), NIE ueber die PUUID - dieselbe
@@ -253,14 +271,22 @@ def key_identity(client) -> str:
     """Kurzer Fingerabdruck des aktiven API-Keys (Cache-Schluessel-Bestandteil).
 
     Nicht zur Sicherheit, sondern zur TRENNUNG: PUUIDs sind key-gebunden, ein
-    Cache-Eintrag eines anderen Keys darf nie wiederverwendet werden."""
-    keys = getattr(client, "_keys", None)
-    first = None
-    if isinstance(keys, (list, tuple)) and keys:
-        first = keys[0]
-    if not first:
+    Cache-Eintrag eines anderen Keys darf nie wiederverwendet werden.
+
+    Massgeblich ist `client.last_key` - der Key, der zuletzt tatsaechlich
+    GEANTWORTET hat. `_keys[0]` gilt nur, solange noch keine Antwort kam:
+    `fetch._FallbackClient` traegt dort bis zum ersten Call den `dev_api_key`,
+    auch wenn der abgelaufen ist und alle Daten in Wahrheit vom `api_key`
+    kommen. Der Proxy reicht nicht-aufrufbare Attribute durch, `last_key`
+    stammt also immer vom aktuell aktiven RiotClient."""
+    active = getattr(client, "last_key", None)
+    if not active:
+        keys = getattr(client, "_keys", None)
+        if isinstance(keys, (list, tuple)) and keys:
+            active = keys[0]
+    if not active:
         return "nokey"
-    digest = hashlib.sha1(str(first).encode("utf-8"), usedforsecurity=False)
+    digest = hashlib.sha1(str(active).encode("utf-8"), usedforsecurity=False)
     return digest.hexdigest()[:8]
 
 
@@ -282,7 +308,6 @@ class RankLookup:
         self.spent = 0
         self.budget_exhausted = False
         self.dead = False             # Riot hat alle Keys abgelehnt
-        self.key_id = key_identity(client)
         self._accounts = shardstore.shared(cfg, "accounts")
         self._ranks = shardstore.shared(cfg, "ranks")
         hours = getattr(cfg, "postgame_rank_ttl_hours", 12)
@@ -290,8 +315,21 @@ class RankLookup:
             self._rank_ttl = max(0.0, float(hours)) * 3600.0
         except (TypeError, ValueError):
             self._rank_ttl = 12 * 3600.0
+        # Beide Memos sind identitaetsBEWUSST gekeyt ((key_id, ...)): waehrend
+        # eines Reports kann der Client den Key wechseln (Dev-Key abgelehnt ->
+        # api_key), und dann gilt kein einziger frueherer Eintrag mehr.
         self._acc_mem: dict = {}
         self._rank_mem: dict = {}
+
+    @property
+    def key_id(self) -> str:
+        """Identitaet des AKTUELL antwortenden Keys (read-only, live berechnet).
+
+        Bewusst kein in `__init__` eingefrorener Wert: `fetch._FallbackClient`
+        wird mit dem `dev_api_key` gebaut und schaltet erst beim ersten
+        abgelehnten Call auf den `api_key` um - eingefroren truege der Cache
+        danach die Dev-Kennung fuer Daten des Haupt-Keys (s. Modul-Doc)."""
+        return key_identity(self.client)
 
     # --- Budget ---
 
@@ -338,25 +376,32 @@ class RankLookup:
 
         Der Cache-Schluessel traegt die Key-Identitaet: der Eintrag eines
         anderen Keys darf nie wiederverwendet werden (er waere gegen jeden
-        Endpunkt HTTP 400 wert)."""
+        Endpunkt HTTP 400 wert).
+
+        Die Identitaet wird ZWEIMAL gelesen - vor dem Call fuer Memo/Cache, nach
+        dem Call fuer das Schreiben. Dazwischen kann der Proxy den Key gewechselt
+        haben (Dev-Key abgelehnt -> `api_key`); die Antwort gehoert dann dem
+        NEUEN Key und darf nur unter dessen Kennung abgelegt werden."""
         rid = str(riot_id or "").strip()
         if "#" not in rid:
             return None
-        memo_key = rid.lower()
-        if memo_key in self._acc_mem:
-            return self._acc_mem[memo_key]
-        cache_id = f"{self.key_id}|{memo_key}"
+        rid_lower = rid.lower()
+        before = self.key_id
+        if (before, rid_lower) in self._acc_mem:
+            return self._acc_mem[(before, rid_lower)]
+        cache_id = f"{before}|{rid_lower}"
         cached = self._accounts.get(cache_id)
         if (isinstance(cached, dict) and cached.get("puuid")
                 and self._accounts.fresh(cache_id, ACCOUNT_TTL_S)):
-            self._acc_mem[memo_key] = cached["puuid"]
+            self._acc_mem[(before, rid_lower)] = cached["puuid"]
             return cached["puuid"]
         name, _, tag = rid.partition("#")
         acc = self._api(self.client.account_by_riot_id, name.strip(), tag.strip())
         puuid = acc.get("puuid") if isinstance(acc, dict) else None
+        now = self.key_id                     # ggf. mitten im Call gewechselt
         if puuid:
-            self._accounts.put(cache_id, {"puuid": puuid})
-        self._acc_mem[memo_key] = puuid
+            self._accounts.put(f"{now}|{rid_lower}", {"puuid": puuid})
+        self._acc_mem[(now, rid_lower)] = puuid
         return puuid
 
     # --- PUUID -> Rang ---
@@ -365,22 +410,28 @@ class RankLookup:
         """Rohe league-v4-Entries einer PUUID (Cache-first). None = kein Abruf.
 
         Eine leere Liste ist ein GUELTIGES Ergebnis (unranked) und wird
-        mitgecacht - sonst fragte jeder Report fuer dieselben Unranked erneut."""
+        mitgecacht - sonst fragte jeder Report fuer dieselben Unranked erneut.
+
+        Das Memo traegt die Key-Identitaet mit: nach einem Key-Wechsel ist ein
+        fehlgeschlagener Abruf (fremde PUUID -> HTTP 400 -> None) kein Urteil
+        mehr ueber die PUUID des neuen Keys. Der Shard-Store dagegen kommt ohne
+        Kennung aus - die PUUID selbst ist bereits key-spezifisch."""
         if not puuid:
             return None
-        if puuid in self._rank_mem:
-            return self._rank_mem[puuid]
+        memo_key = (self.key_id, puuid)
+        if memo_key in self._rank_mem:
+            return self._rank_mem[memo_key]
         if self._rank_ttl > 0 and self._ranks.fresh(puuid, self._rank_ttl):
             cached = self._ranks.get(puuid)
             if isinstance(cached, list):
-                self._rank_mem[puuid] = cached
+                self._rank_mem[memo_key] = cached
                 return cached
         entries = self._api(self.client.league_entries_by_puuid, puuid)
         if isinstance(entries, list):
             self._ranks.put(puuid, entries)
         else:
             entries = None
-        self._rank_mem[puuid] = entries
+        self._rank_mem[memo_key] = entries
         return entries
 
     def rank_by_puuid(self, puuid: str):
@@ -388,8 +439,19 @@ class RankLookup:
         return rank_from_entries(self.entries_for(puuid))
 
     def rank_by_riot_id(self, riot_id: str):
-        """Rang zu einer Riot-ID (der key-sichere Regelweg, s. Modul-Doc)."""
-        return rank_from_entries(self.entries_for(self.puuid_for(riot_id)))
+        """Rang zu einer Riot-ID (der key-sichere Regelweg, s. Modul-Doc).
+
+        Wechselt der Client MITTEN im Abruf den Key (Dev-Key abgelehnt ->
+        `api_key`), gehoerte die zuerst benutzte PUUID noch zum alten Key -
+        Riot quittiert sie beim neuen mit HTTP 400, `entries_for` liefert None.
+        Dann folgt genau EIN zweiter Anlauf unter der neuen Identitaet:
+        `puuid_for` geht dafuer an deren Cache-Eintrag bzw. an account-v1, weil
+        die Memos identitaetsbewusst gekeyt sind."""
+        before = self.key_id
+        entries = self.entries_for(self.puuid_for(riot_id))
+        if entries is None and self.key_id != before:
+            entries = self.entries_for(self.puuid_for(riot_id))
+        return rank_from_entries(entries)
 
 
 def ranks_for(lookup: RankLookup, riot_ids) -> dict:

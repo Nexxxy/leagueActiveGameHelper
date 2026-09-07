@@ -38,7 +38,7 @@
   .retry-all[disabled] { color: var(--muted); cursor: default; }
   .rows { display: flex; flex-direction: column; gap: 6px; }
   .row { display: grid; gap: 10px; align-items: center;
-         grid-template-columns: 150px 1fr 110px 190px 96px 28px;
+         grid-template-columns: 150px 1fr 88px 110px 190px 96px 28px;
          background: var(--card); border: 1px solid var(--border);
          border-left-width: 3px; border-radius: 8px; padding: 9px 12px;
          cursor: pointer; }
@@ -58,6 +58,17 @@
   .chip.loss { background: var(--loss); }
   .chip.unknown { background: var(--border); color: var(--muted); }
   .chip.remake { background: var(--border); color: var(--text); }
+  /* Queue-Banner (nur Ranked, s. rowHtml): steht in der Champion-Spalte und
+     darf den Namen nicht ueberstimmen -> kleiner als der Ausgang-Chip.
+     Solo/Duo im Akzentton, Flex gedaempft - zwei Toene, die sich auf einen
+     Blick trennen, ohne mit Win/Loss (gruen/rot) verwechselbar zu sein. */
+  /* Eigene Grid-Spalte (88px) zwischen Champion und Ausgang-Chip: die Chips
+     fluchten so ueber alle Zeilen senkrecht, statt hinter unterschiedlich
+     langen Champion-/Rollen-Namen zu wandern (Nutzer-Wunsch). Die Zelle
+     bleibt bei Nicht-Ranked-Spielen leer stehen (Platzhalter). */
+  .chip.queue { font-size: .68rem; letter-spacing: .04em; padding: 2px 8px; }
+  .chip.queue.solo { background: var(--accent); }
+  .chip.queue.flex { background: var(--muted); }
   .quality { font-size: .82rem; color: var(--muted); }
   .quality .dot { display: inline-block; width: 8px; height: 8px;
                   border-radius: 50%; margin-right: 6px; vertical-align: middle;
@@ -104,6 +115,8 @@
     .head .player-filter { margin-left: 0; width: 100%; }
     .row { grid-template-columns: 1fr 1fr; }
     .date { grid-column: 1 / -1; }
+    /* Leere Queue-Zelle wuerde im Zwei-Spalten-Fluss einen Slot fressen. */
+    .queue-col:empty { display: none; }
     /* Der Loesch-Knopf bleibt rechts aussen - unter dem Champion-Namen waere er
        auf dem Handy eine Fehlklick-Falle. */
     .del { grid-column: 2; justify-self: end; width: auto; }
@@ -213,6 +226,14 @@ function rowHtml(g, current) {
                 : g.win === false ? ["loss", "Loss"]
                 : ["unknown", "?"];
   const q = QUALITY[g.status] || QUALITY.unknown;
+  // Banner NUR fuer die beiden Ranked-Queues (Nutzer-Wunsch): Normal Draft,
+  // Quickplay & Co. - und Alt-Reports ohne Queue im Record - bleiben ohne.
+  // Den Typ liefert der Server fertig als `ranked` ("solo"/"flex"/null), das
+  // Frontend kennt also keine Queue-Labels. Der Chip sitzt in einer eigenen
+  // Grid-Spalte (s. CSS), damit er zeilenuebergreifend fluchtet.
+  const queue = g.ranked === "solo"
+    ? `<span class="chip queue solo">SOLO/DUO</span>`
+    : (g.ranked === "flex" ? `<span class="chip queue flex">FLEX</span>` : "");
   // Genau EIN Knopf je Zeile: fehlende Daten (Retry) haben Vorrang vor einem
   // blossen Versions-Rueckstand (Fix) - ein Retry baut den Report ohnehin mit
   // dem aktuellen Generator neu.
@@ -236,6 +257,7 @@ function rowHtml(g, current) {
     <div class="date">${fmtDate(g.date_ms)}</div>
     <div class="champ">${esc(g.champ || "unbekannt")}
       ${g.role ? `<span class="role">${esc(g.role)}</span>` : ""}</div>
+    <div class="queue-col">${queue}</div>
     <div><span class="chip ${outcome[0]}">${outcome[1]}</span></div>
     <div class="quality ${q[0]}" title="Qualität der nachgeladenen Daten">
       <span class="dot"></span>${q[1]}</div>

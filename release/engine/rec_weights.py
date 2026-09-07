@@ -24,11 +24,100 @@ class Weights:
     55,5 % (aus), Hit@1 28,6 % vs. 40,5 % - und die Engine insgesamt unter die
     Baseline drueckt. Die Gewichte lagen danach dauerhaft auf 0/False und sind
     beim Testsuite-Review 2026-08-04 samt Code entfallen. Die Stance selbst
-    bleibt: `own_stance`, `stance`/`stance_reason`/`stance_note` (Badge/Text im
+    bleibt: `own_stance`, `stance`/`stance_reason` (Badge/Text im
     Frontend) und der Archetyp-Tilt (`_select_archetype`) sind unveraendert -
-    sie greift nur nicht mehr ins Ranking oder in die Kaufreihenfolge ein."""
+    sie greift nur nicht mehr ins Ranking oder in die Kaufreihenfolge ein.
+
+    Nach demselben Muster gibt es hier auch keine Keystone-SCORE-Schicht mehr
+    (Nutzer-Entscheid 2026-09-06): das Gate war auf zwei unabhaengigen Patches
+    nicht bestanden - die Rangfolge der Sweep-Werte kippte zwischen 16.14 und
+    16.15, ein Effekt mit datensatzabhaengigem Vorzeichen ist Rauschen. Die
+    Hauptrune beeinflusst den Build praktisch nicht; gebaut wird ohnehin
+    weitgehend gleich. Die DATENLAGE bleibt: `pipeline/aggregate.py` fuehrt die
+    `by_keystone`-Zellen weiter in die KB und `pipeline/matchindex.py` das
+    `ks`-Feld - nur liest die Engine sie nicht mehr.
+
+    Die Lage-Schicht (`by_state`) ist denselben Weg NICHT ganz gegangen: sie ist
+    seit dem Nutzer-Entscheid 2026-09-06 per Modus-Schalter `state_factor`
+    stillgelegt (Default 0.0), aber vollstaendig erhalten - Zellen, Lookup,
+    Zuschlag und Text stehen unveraendert da und lassen sich mit einem Wert > 0
+    wieder einschalten, sobald es eine neue Hypothese zu messen gibt.
+    Begruendung des Defaults am Feld.
+
+    Die Gegnerschaden-Schicht (`by_threat`) folgt seit dem Nutzer-Entscheid
+    2026-09-07 exakt demselben Muster: Modus-Schalter `threat_scale`, Default
+    0.0 = aus, Code und Zellen bleiben vollstaendig erhalten. Anders als bei
+    Stance und Keystone war die Abschalt-Regel hier VORAB festgelegt
+    (plan_lage_threat.md F5a) und wurde auf drei Patches gemessen; die Zahlen
+    stehen am Feld. Wichtig fuer die Abgrenzung: was der Nutzer auf den Karten
+    als "gegen dieses Gegnerteam" liest, kommt ganz ueberwiegend NICHT aus
+    dieser Schicht, sondern aus den regelbasierten Sachtexten in `explain_item`
+    ("Ruestung gegen die 58% AD im Gegnerteam", Top-Threat-Nennung) und aus der
+    Boots-Schicht - beide haengen am threat-gewichteten `split` bzw. an
+    `boots_by_threat` und sind vom Schalter unberuehrt."""
+    # --- Gegnerschaden-Schicht (by_threat) ---------------------------------
+    # `threat_scale` ist ein MODUS-Schalter, kein reiner Skalar (Muster
+    # `state_factor`/`heal_factor`):
+    #   0.0  = die Schicht ist KOMPLETT aus. `_conditional_layers` laedt die
+    #          by_threat-Zelle gar nicht erst - es gibt also weder einen
+    #          Score-Zuschlag NOCH den Win-Rate-Text ("62% Win gegen AD-lastige
+    #          Teams"). Der Text haengt bewusst an der Zelle und nicht am Cap:
+    #          ein Cap 0 haette die Wirkung genommen und die Behauptung
+    #          trotzdem stehen gelassen.
+    #   >0.0 = die Schicht wirkt, der Faktor skaliert den Zuschlag;
+    #          0.8 = exakt das Verhalten vor dem Schalter.
+    # `threat_cap` bleibt davon unberuehrt der Deckel des Zuschlags.
+    #
+    # Default 0.0 (Nutzer-Entscheid 2026-09-07 nach der VORAB festgelegten
+    # Regel aus plan_lage_threat.md F5a; Details im Entscheidungs-Log).
+    # Gemessen wurde `threat_cap = 0.0` (aus) gegen `0.2` (an) ueber alle
+    # KB-Kombis auf drei Patches - jeweils Hit@3-Vorteil von "aus":
+    #   16.15: gesamt +0,10 pp, Pool +-0,00
+    #   16.16: gesamt +0,10 pp, Pool +0,37 pp (Gwen +0,6)
+    #   16.17: gesamt +-0,00 pp, Pool +0,13 pp
+    # "aus" ist damit auf ALLEN drei Patches global nicht schlechter, und kein
+    # Pool-Champion verliert auf einem Patch mehr als 0,1 pp - die Regel
+    # ("Mehrheit aus drei Patches, kein Pool-Champion > 1 pp Verlust") ist
+    # erfuellt. Dazu passt die Datenanalyse 2026-09-06 (12 Jungler, zwei
+    # Patches): die Item-Wahl haengt schon ROH kaum von der Gegnerteam-
+    # Klassifikation ab (Cramers V 0,00-0,08). Das Gegnerteam entscheidet ueber
+    # die Resistenz-ART - und genau das sagen die Regeltexte ohnehin -, nicht
+    # ueber die Item-WAHL.
+    #
+    # Die DATENLAGE bleibt: `pipeline/aggregate.py` fuehrt die by_threat-Zellen
+    # unveraendert in die KB, die Schicht ist mit einem Wert > 0 sofort wieder
+    # da. Unberuehrt sind ausserdem `boots_by_threat` (eigene Schicht, eigener
+    # Schalter `boots_kb_factor`) und die regelbasierten Sachtexte aus
+    # `explain_item`.
     threat_cap: float = 0.2           # Cap des by_threat-Schubs (+/-)
-    threat_scale: float = 0.8         # Skalierung des by_threat-Schubs
+    threat_scale: float = 0.0         # Modus-Schalter (s.o.), 0.8 = alt
+    # --- Lage-Schicht (by_state) -------------------------------------------
+    # `state_factor` ist ein MODUS-Schalter, kein reiner Skalar (Muster
+    # `heal_factor`/`next_after_factor`):
+    #   0.0  = die Schicht ist KOMPLETT aus. `_conditional_layers` laedt die
+    #          by_state-Zelle gar nicht erst - es gibt also weder einen
+    #          Score-Zuschlag NOCH einen Begruendungstext ("... wenn du
+    #          vorne/hinten liegst"). Der Text haengt bewusst an der Zelle und
+    #          nicht am Cap: ein Cap 0 haette die Zahl weggenommen und die
+    #          Behauptung stehen lassen.
+    #   >0.0 = die Schicht wirkt, der Faktor skaliert den Zuschlag;
+    #          1.0 = exakt das Verhalten vor dem Schalter.
+    # `state_cap` bleibt davon unberuehrt der Deckel des Zuschlags.
+    #
+    # Default 0.0 (Nutzer-Entscheid 2026-09-06, Details im Entscheidungs-Log).
+    # Zwei unabhaengige Befunde zeigen in dieselbe Richtung:
+    #   1. Backtest-Sweep 16.15 ueber 197.724 Kaeufe: die Schicht AN kostet
+    #      0,6 pp Hit@3, und 0,1/0,2/0,4 liefern bit-identische Reports - der
+    #      Cap greift nie, das Feld war faktisch ein Boolean.
+    #   2. Datenanalyse 2026-09-06 ueber 12 Jungler auf zwei Patches: Cramers V
+    #      Item x Gold-Lage liegt INNERHALB von Kaufslot und Vorgaenger-Item nur
+    #      bei 0,04-0,09. High-Elo kauft im Rueckstand dieselben Items, nur
+    #      frueher im Build - die Lage verschiebt den ZEITPUNKT, nicht die WAHL.
+    # Der Gold-Zustand selbst bleibt unberuehrt erhalten (`gold_state`): er
+    # traegt weiter das Verdikt, die Boots-Opposition, die Backtest-
+    # Stratifizierung und die Defensiv-Reserve (die auf den by_state-Behind-
+    # KAUFZAEHLUNGEN arbeitet, nicht auf diesem Win-Rate-Zuschlag).
+    state_factor: float = 0.0
     state_cap: float = 0.2            # Cap des by_state-Schubs (+/-)
     synergy_factor: float = 0.3       # Faktor fuer _synergy_boost
     redundancy_penalty: float = 0.3   # Abzug bei redundantem Sustain-Stack
@@ -61,45 +150,6 @@ class Weights:
     # steht, ist der Nachweis NICHT erbracht.
     heal_factor: float = 0.0
     heal_cap: float = 0.2             # Cap des by_heal-Schubs (+/-)
-    # KB-datengetriebener Keystone-Schub (by_keystone in builds.yaml): wirkt NUR,
-    # wenn die EIGENE Hauptrune bekannt ist (Live-API `allPlayers[].runes.keystone`
-    # bzw. Match-Perks im Backtest), die Kombi `rich` ist und die Zelle dieser
-    # Perk-ID belegt ist. Mechanik 1:1 wie by_threat/by_heal (Shrinkage gegen
-    # base_win_rate, RANK_MIN_N-Zellgate, Cap).
-    #
-    # Der Wert der Dimension liegt bei den NICHT-Mehrheits-Runen: wo eine Rune
-    # dominiert, ist ihre Zelle praktisch das Marginal-Aggregat (Lift ~ 1, also
-    # harmlos); die Minderheits-Runen sind die, deren abweichende Builds das
-    # Marginal wegbuegelt.
-    #
-    # `keystone_factor` ist wie `heal_factor` ein MODUS-Schalter: 0.0 = die
-    # Schicht ist KOMPLETT aus - die Rune wird nicht einmal in den Kontext
-    # uebernommen, es gibt keinen Schub UND keinen Begruendungstext. >0.0
-    # skaliert den Schub wie `threat_scale`.
-    #
-    # Default 0.0: die Zellen sind mit der Dimension immer in der KB (Datenlage),
-    # die Wirkung schaltet erst ein bestandenes Backtest-Gate frei (Pool-Mittel
-    # Hit@3 muss steigen, kein Pool-Champion darf > 1 pp fallen) - dieselbe
-    # Beweislast wie bei next_after_factor/heal_factor.
-    #
-    # Gate-Lauf (Sweep 0.0/0.4/0.8, Pool Gwen/Shyvana/Briar/Yorick JUNGLE):
-    # Der Nachweis ist NICHT erbracht, weil die Rangfolge der Sweep-Werte
-    # zwischen zwei unabhaengigen Patches KIPPT.
-    #   16.15 (3578 Samples): 0.4 Pool-Hit@3 +0,02 pp - das sind exakt EIN
-    #     Treffer mehr (2603 -> 2604) bei bit-identischem Hit@1; 0.8 faellt
-    #     klar ab (-0,37 pp, Gwen -0,65, Shyvana -0,83).
-    #   16.14 (4159 Samples): dieselbe 0.4 faellt (-0,001 pp, Shyvana -0,33) -
-    #     und der auf 16.15 schlechteste Wert 0.8 ist hier der beste (+0,08 pp).
-    # Kein Wert besteht auf BEIDEN Patches. Ein Effekt, dessen Vorzeichen mit
-    # dem Datensatz wechselt, ist Rauschen - und ein Default aus Rauschen waere
-    # genau die Art Schein-Evidenz, die dieses Gate verhindern soll.
-    #
-    # Dass die Schicht technisch feuert, ist unabhaengig davon belegt (echte
-    # Trainings-KB 16.15, Gwen JUNGLE: Conqueror n=705 vs. First Strike n=406,
-    # und die Begruendungstexte/Rankings unterscheiden sich je Rune). Die
-    # Dimension liefert also Datenlage - nur keine gemessene Hit@3-Verbesserung.
-    keystone_factor: float = 0.0
-    keystone_cap: float = 0.2         # Cap des by_keystone-Schubs (+/-)
     # next_after-Bigramm-Lift (T2/T3, plan_roadmap.md "Validierung 2026-07-29"):
     # 0.0 = AUS (Lift bleibt exakt 1.0), 1.0 = voller Lift, Zwischenwerte
     # daempfen ihn (siehe _next_after_lift).

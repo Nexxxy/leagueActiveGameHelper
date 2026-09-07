@@ -260,22 +260,6 @@ def heal_cells(champion: str, role: str | None = None) -> dict:
     return entry.get("by_heal") or {}
 
 
-def keystone_cells(champion: str, role: str | None = None) -> dict:
-    """Keystone-konditionierte Item-Zellen des Champion+Rollen-Eintrags
-    (KB-Dimension by_keystone): `{"<perk_id>": {games, base_win_rate, items}}`.
-
-    Schluessel sind die Perk-IDs der Hauptrune als STRING (so exportiert die
-    Pipeline sie - YAML-Schluessel muessen eindeutig sein). Der Schluesselraum
-    ist offen: welche Runen ueberhaupt drinstehen, entscheidet die Datenlage
-    (MIN_BUCKET_GAMES je Zelle).
-
-    Leeres Dict fuer KBs, die vor by_keystone gebaut wurden (das Feld fehlt dort
-    komplett - genau wie bei `heal_cells`), und fuer Kombis ohne belegte Zelle.
-    Die Leseseite bekommt dann leere Items und die Schicht bleibt stumm."""
-    _role, entry = for_champion(champion, role)
-    return entry.get("by_keystone") or {}
-
-
 def for_class(bucket: str | None, role: str | None) -> dict:
     """Liefert den Klassen-Eintrag (Bucket + Rolle) aus der `classes:`-Sektion
     der builds.yaml - Fallback fuer duenne Champion-Kombis. Leeres Dict, wenn

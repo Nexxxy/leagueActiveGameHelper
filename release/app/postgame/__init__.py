@@ -32,6 +32,21 @@ _QUEUE_NAME = {420: "Ranked Solo/Duo", 440: "Ranked Flex",
                400: "Normal Draft", 430: "Normal Blind",
                490: "Quickplay", 480: "Swiftplay"}
 
+# WOFUER: Die Match-History soll Ranked-Spiele als Banner ausweisen
+# (Nutzer-Wunsch), hat aber nur das LABEL aus dem Trend-Record - die Queue-ID
+# steht dort nicht. Die Abbildung leitet sich darum aus `_QUEUE_NAME` ab (eine
+# Quelle fuer beide Richtungen); alles andere - Normal-Queues, Alt-Records ohne
+# `queue` - bleibt bewusst ohne Kennung.
+RANKED_KIND = {_QUEUE_NAME[420]: "solo", _QUEUE_NAME[440]: "flex"}
+
+
+def ranked_kind(queue_label) -> str | None:
+    """"solo" / "flex" fuer die beiden Ranked-Queues, sonst None.
+
+    Eingabe ist das Anzeige-Label aus dem Trend-Record (`rec["queue"]`), das
+    auch fehlen darf (Alt-Records) - dann ebenfalls None."""
+    return RANKED_KIND.get(queue_label) if queue_label else None
+
 
 def _final_stats(p: dict) -> dict:
     """Endwerte eines Participants aus den Match-Stats (fuer Lobby-Ranking)."""

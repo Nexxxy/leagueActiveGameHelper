@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from core.config import ROOT, VALID_ROLES, Config
 from engine import (items, knowledge, manifest, profiling, rec_deaths,
-                    rec_partner, rec_weights, recommend)
+                    rec_explain, rec_partner, rec_weights, recommend)
 from . import assets, demo, history, live_client
 
 app = FastAPI(title="League Active Game Helper")
@@ -124,36 +124,6 @@ def _role_from_kb(champion: str) -> str:
     if not champion:
         return ""
     return knowledge.for_champion(champion)[0] or ""
-
-
-def _own_keystone(player: dict) -> tuple[int | None, str | None]:
-    """(Perk-ID, Anzeigename) der Hauptrune eines Spielers aus der Live-API.
-
-    Quelle ist `allPlayers[].runes.keystone` - ein Objekt mit `id` und
-    `displayName`. Die Perk-ID ist derselbe Schluesselraum, in dem die
-    Pipeline ihre `by_keystone`-Zellen fuehrt (Match-V5-Perks), der
-    Anzeigename ist die EINZIGE Quelle fuer einen lesbaren Runen-Namen - es
-    gibt bewusst keinen Runen-Static in diesem Projekt.
-
-    Bewusst strikt defensiv (reine .get-Kette mit Typpruefung): fuer dieses
-    Feld existiert KEIN lokaler Live-Dump, an dem die Feldform verifiziert
-    werden konnte. Fehlt oder taugt ein Glied nicht, ist das Ergebnis
-    (None, None) - dann bleibt die by_keystone-Schicht stumm, genau wie bei
-    alten Dumps und im Demo-Modus (die tragen das Feld nicht)."""
-    runes = player.get("runes")
-    if not isinstance(runes, dict):
-        return None, None
-    keystone = runes.get("keystone")
-    if not isinstance(keystone, dict):
-        return None, None
-    perk_id = keystone.get("id")
-    if not isinstance(perk_id, int) or perk_id <= 0:
-        # Ohne brauchbare Perk-ID gibt es auch keinen Namen zurueck: die ID ist
-        # der Zellen-Schluessel, ein Name allein taugt fuer nichts.
-        return None, None
-    name = keystone.get("displayName")
-    return perk_id, (name.strip() if isinstance(name, str) and name.strip()
-                     else None)
 
 
 def _rid(player: dict) -> str:
@@ -358,7 +328,9 @@ def _build_state() -> dict:
     # Item-Namen der Mitspieler (fuer die Anti-Heal-Team-Coverage): hat schon
     # ein Ally Grievous Wounds, muss der Spieler es nicht selbst bauen.
     ally_items = set()
-    ally_gold_spent = 0
+    # Profile der Mitspieler MIT Rolle - Basis der Team-Gold-Zeile
+    # (profiling.team_gold), die die Rollen-Differenzen daraus bildet.
+    ally_profiles = []
     # Profil des eigenen BOTTOM-Partners fuer die Partner-Kontext-Achse (nur fuer
     # UTILITY relevant, s.u.). Rolle des Allys analog zur Gegner-Logik bestimmen:
     # Scoreboard-Reihenfolge > Smite > Wissensbasis. Index muss konsistent zur
@@ -371,10 +343,9 @@ def _build_state() -> dict:
         ally_profile = profiling.profile_player(
             player, champion_id=ap["champion_id"], name=ap["name"])
         ally_items.update(ally_profile["items"])
-        # Fuer den Team-Kontext der Vorsprungs-Anzeige (rec_stance.lead_note).
-        ally_gold_spent += ally_profile["gold_spent"]
         ally_role = (order_roles.get(idx) or _detect_role(player)
                      or _role_from_kb(ap["name"]))
+        ally_profiles.append({**ally_profile, "role": ally_role})
         if ally_role == "BOTTOM":
             bottom_ally_profile = ally_profile
     # Prioritaet: manueller Override > Smite (eindeutig) > Scoreboard-Position
@@ -397,11 +368,6 @@ def _build_state() -> dict:
     killers = {(p.get("riotIdGameName") or p.get("summonerName")): pin
                for p, pin in resolved}
     death_signal = rec_deaths.signal_from_state(data, active_name, killers)
-    # Eigene Hauptrune (by_keystone): steht in `allPlayers[].runes.keystone` und
-    # kommt damit aus demselben `allgamedata`-Poll wie alles andere - kein
-    # zusaetzlicher Request. Fehlt das Feld (alte Dumps, Demo), bleibt beides
-    # None und die Schicht ist stumm.
-    my_keystone_id, my_keystone_name = _own_keystone(me)
     # Spielstil-Regler: die Stufe wird HIER auf das Weights-Feld abgebildet, die
     # Engine kennt nur den kontinuierlichen Tilt. Stufe 3 -> 0.0 -> exakt
     # DEFAULT_WEIGHTS, das Verhalten ohne Regler bleibt also unberuehrt.
@@ -416,15 +382,26 @@ def _build_state() -> dict:
         my_level=my_profile.get("level", 0),
         ally_items=ally_items,
         champion_id=my_profile["champion_id"],
-        ally_gold_spent=ally_gold_spent,
         bot_partner=bot_partner,
         death_signal=death_signal,
-        my_keystone_id=my_keystone_id,
-        my_keystone_name=my_keystone_name,
         weights=weights,
     )
     _add_item_ids(reco)
 
+    # Anti-Kandidaten je Gegner: welche Items der SICHTBAREN Empfehlungsliste
+    # gegen seinen Schadenstyp helfen. Reine Anzeige-Regel - die Liste selbst
+    # bleibt unberuehrt, es wird nur benannt, was ohnehin drinsteht. Bewusst
+    # HIER gerechnet und nicht im Frontend (wie team_gold): so landet der Wert
+    # im YAML-Mitschrieb und bleibt in Python pruefbar. Das Feld ist IMMER da,
+    # notfalls leer - auf welchen Karten die Zeile erscheint, entscheidet das
+    # Frontend (nur gefuetterte Gegner und der Todes-Signal-Champion).
+    for enemy in enemies:
+        enemy["counter_items"] = rec_explain.counter_items(
+            reco.get("items", []), enemy["damage_split"])
+
+    # Erkannte/gesetzte Rolle des Spielers; sonst die Rolle, auf die die
+    # Empfehlung ausgewichen ist. Anzeige UND Team-Gold nutzen dieselbe.
+    my_role = role_hint or reco["role"]
     state = {
         "phase": "in_game",
         "patch": knowledge.load()["patch"],
@@ -435,8 +412,14 @@ def _build_state() -> dict:
         "game_time": data.get("gameData", {}).get("gameTime", 0),
         # Erkannte/gesetzte Rolle anzeigen, auch wenn die Wissensbasis fuer
         # sie keine Daten hat und die Empfehlungen auf eine andere ausweichen
-        "player": {**my_profile, "role": role_hint or reco["role"]},
+        "player": {**my_profile, "role": my_role},
         "enemies": enemies,
+        # Item-Gold beider Teams samt Rollen-Differenzen (Gold-Zeile der
+        # Live-Ansicht). Bewusst HIER gerechnet und nicht im Frontend: die
+        # Profile liegen ohnehin vor, der Wert landet damit im YAML-Mitschrieb
+        # und bleibt in Python pruefbar.
+        "team_gold": profiling.team_gold(
+            [{**my_profile, "role": my_role}, *ally_profiles], enemies),
         "recommendations": reco,
         # Reglerstand mit im Zustand: das Frontend stellt den Schieber danach,
         # und der YAML-Mitschrieb haelt fest, unter welcher Vorgabe die
@@ -695,6 +678,23 @@ def post_history_retry_all(player: str | None = None):
     except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
         print(f"Warnung: Sammel-Retry nicht startbar ({exc})")
         return {"started": 0, "reason": str(exc)}
+
+
+# Cache-Control: no-cache auf JEDER Antwort. WARUM: das Frontend laedt nur
+# seine Daten per fetch nach, die HTML-Datei selbst nie - und ohne den Header
+# durfte der Browser index.html heuristisch aus dem Cache nehmen (StaticFiles
+# sendet nur Last-Modified/ETag). Nach einer Frontend-Aenderung stand im
+# offenen Tab dann das alte Markup neben neuen Daten (Nutzer-Befund
+# 2026-09-05: Du-Zeile und Team-Gold-Zeile "unsichtbar"). no-cache heisst
+# REVALIDIEREN, nicht "nicht cachen": bei unveraenderter Datei antwortet der
+# Server auf das If-None-Match des Browsers mit 304, es wird also nichts
+# doppelt uebertragen. Auf die JSON-Antworten wirkt der Header nur als
+# Klarstellung (ohne Validator werden sie ohnehin nicht heuristisch gecacht).
+@app.middleware("http")
+async def _no_cache(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 # Post-Game-Reports als statische Dateien ausliefern (der Frontend-Button

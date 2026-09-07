@@ -48,7 +48,7 @@ from html import unescape
 from pathlib import Path
 
 from core.cacheio import read_json
-from .postgame import REPORT_VERSION, enrich, fetch, trend
+from .postgame import REPORT_VERSION, enrich, fetch, ranked_kind, trend
 
 # Wie viele Spiele die History maximal zeigt (Nutzer-Wunsch: die letzten 20).
 DEFAULT_LIMIT = 20
@@ -561,6 +561,12 @@ def _row(path: Path, rec: dict | None, now_s: float, has_key: bool) -> dict:
         "champ": rec.get("champ"),
         "role": rec.get("role"),
         "queue": rec.get("queue"),
+        # WOFUER: Das Frontend setzt nur auf Ranked-Spiele ein Banner
+        # (Nutzer-Wunsch) und soll dafuer keine Label-Strings kennen muessen -
+        # die Zuordnung Label -> "solo"/"flex" macht `postgame.ranked_kind`,
+        # die einzige Quelle der Queue-Namen. Alles andere (Normal-Queues,
+        # Alt-Records ohne `queue`) -> None = kein Banner.
+        "ranked": ranked_kind(rec.get("queue")),
         "win": None if remake else rec.get("win"),
         "remake": remake,
         "status": status,
