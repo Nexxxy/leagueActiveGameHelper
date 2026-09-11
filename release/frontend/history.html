@@ -94,6 +94,26 @@
   .del:hover { color: var(--loss); }
   .del[disabled] { color: var(--border); cursor: default; }
   .err { grid-column: 1 / -1; color: var(--loss); font-size: .78rem; }
+  /* Ladebalken eines laufenden Neubaus: zeilenbreite Leiste UNTER der Zeile,
+     derselbe Slot wie .err - in der schmalen Aktions-Zelle waere kein Platz
+     fuer die Beschriftung, und der Knopf ("lädt …") bleibt dort ohnehin
+     stehen. Balken links (nimmt den Rest der Breite), Text rechts daneben.
+     Gleiche Bauart und Klassennamen wie der Balken auf dem Hauptbildschirm
+     (.bar/.fill), damit beide Seiten wie EIN System aussehen. */
+  .progress { grid-column: 1 / -1; display: flex; align-items: center;
+              gap: 10px; }
+  /* display:flex wuerde sonst das UA-[hidden]:none schlagen (Load-Formular). */
+  .progress[hidden] { display: none; }
+  .bar { flex: 1; height: 6px; border-radius: 3px; background: var(--border);
+         overflow: hidden; }
+  .fill { display: block; height: 100%; border-radius: 3px;
+          background: var(--accent); transition: width .3s ease; }
+  /* Unbestimmte Phase (Warten auf die Riot-Indexierung): es gibt nichts zu
+     zaehlen, also laeuft ein Streifen durch, statt einen Fortschritt zu
+     behaupten, den niemand kennt. */
+  .bar.indeterminate .fill { animation: progslide 1.5s ease-in-out infinite; }
+  @keyframes progslide { from { margin-left: -35%; } to { margin-left: 100%; } }
+  .plabel { color: var(--muted); font-size: .78rem; white-space: nowrap; }
   .empty { margin-top: 40px; text-align: center; color: var(--muted); }
   .load { margin-top: 24px; padding-top: 14px;
           border-top: 1px solid var(--border); }
@@ -109,6 +129,7 @@
   .load .hint { color: var(--muted); font-size: .78rem; margin-top: 6px; }
   .load .err { margin-top: 6px; }
   .load .ok { color: var(--win); font-size: .78rem; margin-top: 6px; }
+  .load .progress { margin-top: 6px; }
   @media (max-width: 760px) {
     /* Der Kopf bricht um: das Filter-Feld bekommt eine eigene, volle Zeile -
        mit auto-Margin haenge es sonst mit seinen 190px ueber den Rand. */
@@ -153,6 +174,9 @@
     <div class="hint">Die Match-ID ist &lt;Platform&gt;_&lt;GameID&gt; &ndash;
       der Riot-Client zeigt nur die Zahl.</div>
     <div class="err" id="loadErr" hidden></div>
+    <!-- Derselbe Balken wie in den Zeilen, nur unter der Meldung: ein
+         Frisch-Load hat noch keine History-Zeile, an der er haengen koennte. -->
+    <div class="progress" id="loadProgress" hidden></div>
   </div>
 
 <script>
@@ -218,6 +242,19 @@ function fixTitle(g, current) {
   return `Mit aktueller Report-Version neu generieren (${from} → v${current})`;
 }
 
+// Balken-Markup zu einem Fortschritts-Snapshot des Servers - EINE Quelle fuer
+// die Zeilen UND das Load-Formular, damit beide Stellen gleich aussehen.
+// Die Beschriftung kommt FERTIG vom Server ("Ränge 4/10"), das Frontend
+// formuliert nichts selbst und escaped nur.
+function progressHtml(p) {
+  // Unbestimmt (Warten auf Riot): der Streifen laeuft, `pct` waere hier nur der
+  // eingefrorene Stand von vorher - dann lieber gar keine Zahl zeigen.
+  const pct = Math.max(0, Math.min(100, Number(p.pct) || 0));
+  return `<div class="bar${p.indeterminate ? " indeterminate" : ""}"
+      ><span class="fill" style="width:${p.indeterminate ? 35 : pct}%"></span></div>
+    <span class="plabel">${esc(p.label)}</span>`;
+}
+
 function rowHtml(g, current) {
   // Remake: neutraler Chip statt Win/Loss - das Spiel zaehlt nicht in die
   // Winrate (der Server liefert dafuer win=null, s. app/history.py).
@@ -247,6 +284,11 @@ function rowHtml(g, current) {
             : ""));
   const err = g.retry_error
     ? `<div class="err">Retry fehlgeschlagen: ${esc(g.retry_error)}</div>` : "";
+  // Laeuft der Neubau gerade, zeigt eine zeilenbreite Leiste unter der Zeile,
+  // wie weit er ist (der Server liefert den Snapshot nur solange, s.
+  // retry_progress). Sie ERSETZT nichts - die Aktions-Zelle behaelt "lädt …".
+  const prog = g.retry_progress
+    ? `<div class="progress">${progressHtml(g.retry_progress)}</div>` : "";
   // Loeschen gibt es auf JEDER Zeile (auch auf vollstaendigen Reports) - nur
   // waehrend ein Lauf an der Datei arbeitet, waere es wirkungslos: der Worker
   // schreibt die Datei am Ende neu.
@@ -264,6 +306,7 @@ function rowHtml(g, current) {
     <div>${action}</div>
     ${del}
     ${err}
+    ${prog}
   </div>`;
 }
 
@@ -272,24 +315,33 @@ function render(data) {
   syncPlayerList(data.players);
   document.getElementById("empty").hidden = games.length > 0;
   const unknown = data.unknown ? ` <span>(${data.unknown} unbekannt)</span>` : "";
+  // Gesamtstand des Sammel-Retries: die Zeilen zeigen je ihren eigenen Balken,
+  // aber nicht, das wievielte von wie vielen Spielen gerade dran ist. Der
+  // Server liefert `batch` nur waehrend eines Sammel-Laufs.
+  const batch = data.batch
+    ? ` · Nachladen <b>${esc(data.batch.done)}</b>/${esc(data.batch.total)}` : "";
   document.getElementById("summary").innerHTML = games.length
     ? `Letzte <b>${games.length}</b> Spiele · <b>${data.wins}</b> Wins /
        <b>${data.losses}</b> Losses ·
        <b>${data.winrate_pct === null ? "–" : data.winrate_pct + " %"}</b>
-       Winrate${unknown}`
+       Winrate${unknown}${batch}`
     : "";
   document.getElementById("rows").innerHTML =
     games.map(g => rowHtml(g, data.report_version)).join("");
-  // Laeuft irgendwo ein Retry, alle 5 s nachladen, bis er durch ist.
+  // Laeuft irgendwo ein Retry, in kurzer Kadenz nachladen, bis er durch ist.
   const running = games.some(g => g.retry_running);
   // "Alle nachladen" nur, wenn es etwas zu tun gibt und gerade nichts laeuft
   // (der Sammel-Lauf setzt alle eingeplanten Zeilen sofort auf retry_running).
   const btn = document.getElementById("retryAll");
   btn.hidden = running || !games.some(g => g.retryable);
   if (!btn.hidden) { btn.disabled = false; btn.innerHTML = "&#8635; Alle nachladen"; }
-  if (running && !pollTimer) pollTimer = setTimeout(poll, 5000);
+  if (running && !pollTimer) pollTimer = setTimeout(poll, POLL_MS);
 }
 
+// Kadenz waehrend eines Laufs. Bewusst kuerzer als frueher (5 s): der Balken
+// soll sich sichtbar bewegen, nicht einmal pro Phase springen. Gepollt wird nur
+// solange wirklich etwas laeuft.
+const POLL_MS = 3000;
 let pollTimer = null;
 
 async function load() {
@@ -299,7 +351,7 @@ async function load() {
 
 async function poll() {
   pollTimer = null;
-  try { await load(); } catch (err) { pollTimer = setTimeout(poll, 5000); }
+  try { await load(); } catch (err) { pollTimer = setTimeout(poll, POLL_MS); }
 }
 
 async function startRetry(matchId, btn) {
@@ -321,7 +373,7 @@ async function startRetry(matchId, btn) {
     btn.textContent = "↻ Retry";
     return;
   }
-  if (!pollTimer) pollTimer = setTimeout(poll, 5000);
+  if (!pollTimer) pollTimer = setTimeout(poll, POLL_MS);
 }
 
 // Fix: gleicher Ablauf wie der Retry (POST, dann Polling ueber /api/history) -
@@ -345,7 +397,7 @@ async function startFix(matchId, btn) {
     btn.innerHTML = "&#10227; Fix";
     return;
   }
-  if (!pollTimer) pollTimer = setTimeout(poll, 5000);
+  if (!pollTimer) pollTimer = setTimeout(poll, POLL_MS);
 }
 
 // Loeschen: ohne Sicherheitsabfrage (Nutzer-Wunsch - ein Klick genuegt). Die
@@ -444,6 +496,7 @@ const loadPlatform = document.getElementById("loadPlatform");
 const loadGameId = document.getElementById("loadGameId");
 const loadBtn = document.getElementById("loadBtn");
 const loadErr = document.getElementById("loadErr");
+const loadProgress = document.getElementById("loadProgress");
 let loadTimer = null;
 
 loadPlatform.innerHTML = PLATFORMS.map(
@@ -462,21 +515,31 @@ function loadBusy(busy) {
   loadBtn.innerHTML = busy ? "&#9203; lädt …" : "Laden";
 }
 
+// Balken unter der Meldung des Formulars; ohne Snapshot (Lauf fertig oder
+// gescheitert) verschwindet er wieder.
+function showLoadProgress(p) {
+  loadProgress.innerHTML = p ? progressHtml(p) : "";
+  loadProgress.hidden = !p;
+}
+
 // Ein Frisch-Load hinterlaesst bei einem Fehler KEINE Datei (und damit keine
 // History-Zeile) - der Zustand kommt darum ueber den eigenen Endpoint.
 async function pollLoad(matchId) {
   loadTimer = null;
-  let state = null;
+  let state = null, progress = null;
   try {
     const resp = await fetch(
       `/api/history/load/${encodeURIComponent(matchId)}`);
-    state = (await resp.json()).state;
+    const data = await resp.json();
+    state = data.state;
+    progress = data.progress;   // Snapshot des laufenden Neubaus, sonst null
   } catch (err) {
-    loadTimer = setTimeout(() => pollLoad(matchId), 4000);
+    loadTimer = setTimeout(() => pollLoad(matchId), POLL_MS);
     return;
   }
   if (state === "done") {
     loadBusy(false);
+    showLoadProgress(null);
     loadGameId.value = "";
     loadMsg("");
     load().catch(() => {});
@@ -484,14 +547,17 @@ async function pollLoad(matchId) {
   }
   if (state && state.startsWith("failed:")) {
     loadBusy(false);
+    showLoadProgress(null);
     loadMsg(`Laden fehlgeschlagen: ${state.slice(7)}`);
     return;
   }
-  loadTimer = setTimeout(() => pollLoad(matchId), 4000);
+  showLoadProgress(progress);
+  loadTimer = setTimeout(() => pollLoad(matchId), POLL_MS);
 }
 
 async function startLoad() {
   loadMsg("");
+  showLoadProgress(null);   // Rest eines vorherigen Laufs raeumen
   loadBusy(true);
   let data;
   try {
@@ -517,7 +583,7 @@ async function startLoad() {
     return;
   }
   if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
-  loadTimer = setTimeout(() => pollLoad(data.match_id), 4000);
+  loadTimer = setTimeout(() => pollLoad(data.match_id), POLL_MS);
 }
 
 loadBtn.addEventListener("click", () => { if (!loadBtn.disabled) startLoad(); });

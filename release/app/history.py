@@ -49,6 +49,9 @@ from pathlib import Path
 
 from core.cacheio import read_json
 from .postgame import REPORT_VERSION, enrich, fetch, ranked_kind, trend
+# Direkt-Import: der Parameter der Bau-Funktionen heisst selbst `progress` und
+# wuerde das Modul im Funktionskoerper verdecken.
+from .postgame.progress import NOOP, Progress
 
 # Wie viele Spiele die History maximal zeigt (Nutzer-Wunsch: die letzten 20).
 DEFAULT_LIMIT = 20
@@ -259,24 +262,62 @@ def _sniff_roster(path: Path) -> tuple[list, str | None, list, list]:
 # ============================================================================
 
 _RETRY_STATE: dict[str, str] = {}
+# Fortschritt der LAUFENDEN Retries (Snapshot-Dict je Match, s.
+# app/postgame/progress.py) - reiner Anzeige-Zustand fuer den Ladebalken der
+# Zeile. Gleicher Lock wie `_RETRY_STATE`: Zustand und Fortschritt gehoeren
+# zusammen (ist der Zustand nicht mehr "running", muss der Balken weg sein).
+_RETRY_PROGRESS: dict[str, dict] = {}
 _RETRY_LOCK = threading.Lock()
 
 # Laeuft gerade ein Sammel-Retry ("Alle nachladen")? Eigenes Flag mit eigenem
 # Lock, damit ein zweiter Batch-Trigger abgelehnt wird, waehrend der erste noch
 # seine Spiele abarbeitet (die Einzel-Spiele schuetzt _RETRY_STATE).
 _BATCH_RUNNING = False
+# Gesamtstand des Sammel-Retries ({"done": int, "total": int}) oder None -
+# die Kopfzeile zeigt daraus "Spiel 3/12", waehrend die Zeilen ihren eigenen
+# Balken haben.
+_BATCH_PROGRESS: dict | None = None
 _BATCH_LOCK = threading.Lock()
+
+# Phasen-Plan eines History-Neubaus: der Resolver sucht erst das passende Spiel
+# (entfaellt bei Fix/Laden, dort ist die Match-ID bekannt), danach laeuft der
+# normale Report-Bau.
+_RETRY_PLAN = ["search", "load", "analyze", "ranks", "estimate", "write"]
 
 
 def _set_retry_state(match_id: str, state: str) -> None:
+    """Registry-Zustand setzen; alles ausser "running" raeumt den Fortschritt.
+
+    So kann keine Zeile mit einem eingefrorenen Balken zurueckbleiben, wenn ein
+    Lauf endet - die Zeile faellt auf ihre normale Darstellung zurueck."""
     with _RETRY_LOCK:
         _RETRY_STATE[match_id] = state
+        if state != "running":
+            _RETRY_PROGRESS.pop(match_id, None)
 
 
 def retry_state(match_id: str) -> str | None:
     """Zustand eines Retries: "running" | "done" | "failed:<grund>" | None."""
     with _RETRY_LOCK:
         return _RETRY_STATE.get(match_id)
+
+
+def _set_retry_progress(match_id: str, snapshot) -> None:
+    """Fortschritts-Snapshot eines laufenden Retries ablegen (None = loeschen).
+
+    Senke fuer den `on_change`-Callback des Worker-`Progress` - laeuft also auf
+    dem Worker-Thread, waehrend /api/history liest."""
+    with _RETRY_LOCK:
+        if snapshot is None:
+            _RETRY_PROGRESS.pop(match_id, None)
+        else:
+            _RETRY_PROGRESS[match_id] = snapshot
+
+
+def retry_progress(match_id: str) -> dict | None:
+    """Fortschritt eines laufenden Retries (Snapshot-Dict) oder None."""
+    with _RETRY_LOCK:
+        return _RETRY_PROGRESS.get(match_id)
 
 
 def _set_batch_running(value: bool) -> None:
@@ -291,11 +332,25 @@ def batch_running() -> bool:
         return _BATCH_RUNNING
 
 
+def _set_batch_progress(value) -> None:
+    global _BATCH_PROGRESS
+    with _BATCH_LOCK:
+        _BATCH_PROGRESS = value
+
+
+def batch_progress() -> dict | None:
+    """Gesamtstand des Sammel-Retries ({"done", "total"}) oder None."""
+    with _BATCH_LOCK:
+        return _BATCH_PROGRESS
+
+
 def reset_retry_state() -> None:
     """Registry leeren (nur fuer Tests / Server-Neustart-Semantik)."""
     with _RETRY_LOCK:
         _RETRY_STATE.clear()
+        _RETRY_PROGRESS.clear()
     _set_batch_running(False)
+    _set_batch_progress(None)
 
 
 # ============================================================================
@@ -575,6 +630,10 @@ def _row(path: Path, rec: dict | None, now_s: float, has_key: bool) -> dict:
         "retry_running": state == "running",
         "retry_error": (state.split(":", 1)[1] if state
                         and state.startswith("failed:") else None),
+        # Ladebalken der Zeile: nur waehrend eines Laufs, sonst None. Bewusst an
+        # den Zustand gekoppelt - ein Snapshot ohne laufenden Retry waere ein
+        # eingefrorener Balken.
+        "retry_progress": retry_progress(path.stem) if state == "running" else None,
         # Versionierung: `report_version` ist der Stand DIESES Reports (None =
         # unbekannt), `outdated` das Urteil dagegen, `fixable` ob sich daraus
         # ein Fix-Lauf starten laesst.
@@ -726,11 +785,15 @@ def list_games(cfg, *, limit: int = DEFAULT_LIMIT, now_s: float | None = None,
     Rueckgabe::
 
         {"games": [ {match_id, url, date_ms, champ, role, win, status,
-                     retryable, retry_running, retry_error,
+                     retryable, retry_running, retry_error, retry_progress,
                      report_version, outdated, fixable}, ... ],
          "wins": int, "losses": int, "unknown": int, "winrate_pct": int|None,
-         "report_version": int,
+         "report_version": int, "batch": {"done": int, "total": int}|None,
          "player": str|None, "default_player": str|None, "players": [str, ...]}
+
+    `retry_progress` ist der Ladebalken-Snapshot der Zeile (nur waehrend eines
+    Laufs, sonst null, s. `retry_progress()`); `batch` der Gesamtstand eines
+    laufenden Sammel-Retries ("Spiel 3/12") bzw. null.
 
     `report_version` auf oberster Ebene ist der AKTUELLE Stand des
     Report-Generators (einmal, nicht je Zeile); je Zeile steht daneben der
@@ -818,6 +881,9 @@ def list_games(cfg, *, limit: int = DEFAULT_LIMIT, now_s: float | None = None,
         "unknown": len(rows) - decided,
         "winrate_pct": round(wins / decided * 100) if decided else None,
         "report_version": REPORT_VERSION,
+        # Gesamtstand eines laufenden Sammel-Retries (None = keiner laeuft) -
+        # gehoert nicht in die Zeilen, sondern in die Kopfzeile.
+        "batch": batch_progress(),
         "player": player or None,
         "default_player": _default_player(cfg),
         "players": _known_players(index),
@@ -913,7 +979,8 @@ def _window_ids(client, puuid: str, date_ms: int, log=print) -> list:
 
 
 def resolve_match_id(cfg, *, roster=None, date_ms=None, champ=None,
-                     lookback: int = RETRY_LOOKBACK, log=print) -> str | None:
+                     lookback: int = RETRY_LOOKBACK, log=print,
+                     progress=NOOP) -> str | None:
     """Echte Match-ID zu einem (Live-)Report finden - ohne das Capture.
 
     Ablauf: Identitaet (`cfg.me`) -> PUUID -> Kandidaten-IDs -> je Kandidat das
@@ -936,7 +1003,10 @@ def resolve_match_id(cfg, *, roster=None, date_ms=None, champ=None,
     `lookback` Spiele".
 
     Kein Treffer / keine Identitaet -> None (der Aufrufer meldet das als
-    "nicht gefunden")."""
+    "nicht gefunden").
+
+    `progress` bekommt die Zahl der Kandidaten als `total` und je geprueftem
+    Kandidaten einen Tick - erst hier steht fest, wie viele es sind."""
     ident = (cfg.me or "").strip()
     if not ident:
         log("[history] Keine Identitaet (me:) - Retry nicht moeglich.")
@@ -958,10 +1028,12 @@ def resolve_match_id(cfg, *, roster=None, date_ms=None, champ=None,
         log("[history] Keine Match-IDs in der Match-History gefunden.")
         return None
 
+    progress.phase("search", "Match suchen {done}/{total}", total=len(ids))
     champs = frozenset(c for c in (roster or []) if c)
     best_id, best_delta = None, None
     for mid in ids:
         match = enrich._load_match(cfg, client, mid)
+        progress.tick()
         if match is None:
             continue
         if champs and enrich._roster_matches(champs, match):
@@ -982,7 +1054,7 @@ def resolve_match_id(cfg, *, roster=None, date_ms=None, champ=None,
 
 
 def _rebuild_report(cfg, match_id: str, path: Path, rec: dict, log=print,
-                    real_id: str | None = None) -> str:
+                    real_id: str | None = None, progress=NOOP) -> str:
     """Den Report unter `path` aus dem vollen Timeline-Pfad neu schreiben.
 
     Der HTML-Dateiname bleibt in der Regel exakt derselbe (die History-Zeile
@@ -1000,7 +1072,11 @@ def _rebuild_report(cfg, match_id: str, path: Path, rec: dict, log=print,
         gebaut (sonst in diese hier), danach fliegen alle uebrigen Duplikate.
 
     `real_id` uebersteuert die Aufloesung (der manuelle GameID-Load kennt die
-    Match-ID bereits). Rueckgabe = Registry-Zustand."""
+    Match-ID bereits). Rueckgabe = Registry-Zustand.
+
+    `progress` traegt den Ladebalken der Zeile: die Such-Phase gehoert nur zum
+    Retry - Fix und Laden kennen die Match-ID und streichen sie aus dem Plan
+    (ihr Anteil geht dann an die uebrigen Phasen)."""
     from app import postgame
     from .postgame import render
 
@@ -1011,6 +1087,7 @@ def _rebuild_report(cfg, match_id: str, path: Path, rec: dict, log=print,
         except OSError:
             date_ms = None
     if real_id:
+        progress.skip("search")
         log(f"[history] Match-ID {real_id} vorgegeben - Resolver uebersprungen.")
     elif _REAL_MATCH_ID.match(path.stem):
         # Der Dateiname IST schon die Match-ID (Report aus `pipeline postgame`
@@ -1019,9 +1096,14 @@ def _rebuild_report(cfg, match_id: str, path: Path, rec: dict, log=print,
         # nachladbar, wenn gar kein Trend-Record dazu existiert (ohne Record
         # gaebe es weder Roster noch Champion, der Resolver liefe ins Leere).
         real_id = path.stem
+        progress.skip("search")
         log(f"[history] Datei-Stamm {real_id} ist bereits eine Match-ID - "
             f"Resolver uebersprungen.")
     else:
+        # Die Zahl der Kandidaten steht erst im Resolver fest - die Phase wird
+        # hier trotzdem schon betreten, damit die Zeile sofort "Match suchen"
+        # zeigt statt eines leeren Balkens.
+        progress.phase("search", "Match suchen {done}/{total}")
         roster, champ = rec.get("roster"), rec.get("champ")
         if not roster:
             # Record-lose Datei (ihr Record wurde von einem anderen Lauf
@@ -1033,7 +1115,7 @@ def _rebuild_report(cfg, match_id: str, path: Path, rec: dict, log=print,
                 log(f"[history] Kein Roster im Record - {len(roster)} Champions "
                     f"aus {path.name} gelesen.")
         real_id = resolve_match_id(cfg, roster=roster, date_ms=date_ms,
-                                   champ=champ, log=log)
+                                   champ=champ, log=log, progress=progress)
     if not real_id:
         log(f"[history] Kein passendes Spiel zu {match_id} in der "
             f"Match-History gefunden.")
@@ -1058,7 +1140,8 @@ def _rebuild_report(cfg, match_id: str, path: Path, rec: dict, log=print,
     real_file = cfg.postgame_out_dir / f"{real_id}.html"
     target = real_file if real_file in dupes else path
 
-    report = postgame.build_report(cfg, real_id, me=(cfg.me or None), log=log)
+    report = postgame.build_report(cfg, real_id, me=(cfg.me or None), log=log,
+                                   progress=progress)
     # Datei-Stempel behalten (URL bleibt stabil), Record trotzdem unter der
     # echten ID fuehren - s. trend.extract_record/write_record.
     report["source_match_id"] = target.stem
@@ -1117,10 +1200,17 @@ def _retry_once(cfg, match_id: str, path: Path, rec: dict, log=print,
     """Ein Spiel neu bauen und den Registry-Zustand hinterlassen.
 
     Faengt ALLES ab (auch SystemExit aus dem Riot-Client) - der Worker-Thread
-    darf nichts nach aussen werfen. Rueckgabe = gesetzter Zustand."""
+    darf nichts nach aussen werfen. Rueckgabe = gesetzter Zustand.
+
+    Hier entsteht auch der Fortschritt dieses Laufs: er landet ueber
+    `_set_retry_progress` in der Registry (die Zeile zeigt daraus ihren Balken)
+    und wird vom abschliessenden `_set_retry_state` wieder weggeraeumt."""
+    progress = Progress(plan=_RETRY_PLAN,
+                        on_change=lambda snap: _set_retry_progress(match_id,
+                                                                   snap))
     try:
         state = _rebuild_report(cfg, match_id, path, rec, log=log,
-                                real_id=real_id)
+                                real_id=real_id, progress=progress)
     except (Exception, SystemExit) as exc:   # noqa: BLE001 - nie crashen
         log(f"[history] Retry {match_id} fehlgeschlagen ({exc!r}).")
         state = f"failed:{exc}"
@@ -1407,6 +1497,9 @@ def start_retry_all(cfg, *, spawn=None, sleep=time.sleep, log=print,
     def _work() -> None:
         try:
             for i, (mid, path) in enumerate(jobs):
+                # Gesamtstand fuer die Kopfzeile: `done` = FERTIGE Spiele, das
+                # laufende zaehlt erst mit, wenn es durch ist.
+                _set_batch_progress({"done": i, "total": len(jobs)})
                 # Zustand direkt vor dem Spiel (nochmal) setzen - so gilt
                 # "running" auch dann, wenn jemand die Registry zwischendurch
                 # geleert hat.
@@ -1416,6 +1509,7 @@ def start_retry_all(cfg, *, spawn=None, sleep=time.sleep, log=print,
                     sleep(RETRY_BATCH_PAUSE_S)
         finally:
             _set_batch_running(False)
+            _set_batch_progress(None)
             log(f"[history] Sammel-Retry beendet ({len(jobs)} Spiele).")
 
     log(f"[history] Sammel-Retry fuer {len(jobs)} Spiele gestartet ...")

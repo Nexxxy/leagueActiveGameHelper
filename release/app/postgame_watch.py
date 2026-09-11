@@ -34,6 +34,11 @@ import threading
 import time
 from datetime import datetime
 
+from app.postgame.progress import NOOP, Progress
+
+# Phasen-Plan eines Stufe-2-Laufs (s. app/postgame/progress.py): erst das
+# unbestimmte Warten auf Riots Indexierung, danach der volle Report-Bau.
+_STAGE2_PLAN = ["wait_riot", "load", "analyze", "ranks", "estimate", "write"]
 
 # Verzoegerung (Sekunden) fuer den EINEN spaeten Zweitversuch, falls Stufe 2 ihr
 # Retry-Budget erschoepft hat. Riot indexiert manche Matches erst deutlich
@@ -142,7 +147,7 @@ def _write_pending_progress(cfg, result, out_path, attempt, retries, is_retry,
 def _default_enrich_stage2(cfg, result, out_path, log,
                            retries: int | None = None,
                            backoff: float | None = None,
-                           is_retry: bool = False) -> bool:
+                           is_retry: bool = False, progress=NOOP) -> bool:
     """Stufe 2: mit Retry/Backoff den VOLLEN Match-V5-Report nachziehen.
 
     Je Versuch: die echte Match-ID ueber den Roster-Abgleich suchen
@@ -163,7 +168,13 @@ def _default_enrich_stage2(cfg, result, out_path, log,
     `enrich_backoff_seconds`); Tests injizieren `retries`/`backoff` direkt.
     `is_retry` markiert den spaeten Zweitversuch (nur fuer die Anzeige).
     Rueckgabe: True bei erfolgreicher Aufwertung, sonst False (Budget
-    erschoepft / kein Roster-Treffer)."""
+    erschoepft / kein Roster-Treffer).
+
+    `progress` traegt den Hauptbildschirm-Ladebalken: das Warten auf Riots
+    Indexierung ist eine UNBESTIMMTE Phase (wie lange Riot braucht, weiss
+    niemand - nur der Versuchszaehler ist ehrlich), erst der Report-Bau selbst
+    meldet echte Anteile. Der Zwischenstand in der Report-HTML bleibt davon
+    unberuehrt (der Report ist eine statische Datei, s. `_write_pending_progress`)."""
     from app import postgame
     from app.postgame import enrich, render
     if retries is None:
@@ -174,10 +185,15 @@ def _default_enrich_stage2(cfg, result, out_path, log,
     # der activePlayer der Nutzer).
     ident = (cfg.me or "").strip() or result.me_ident
     for attempt in range(1, retries + 1):
+        progress.phase("wait_riot",
+                       f"Warte auf Riot – Versuch {attempt}/{retries}"
+                       + (" (später Zweitversuch)" if is_retry else ""),
+                       indeterminate=True)
         try:
             real_id = enrich.find_match_id(cfg, result.pid_map, ident, log=log)
             if real_id:
-                report = postgame.build_report(cfg, real_id, me=ident, log=log)
+                report = postgame.build_report(cfg, real_id, me=ident, log=log,
+                                               progress=progress)
                 # Datei-Stempel behalten (URL/History-Zeile bleiben stabil),
                 # Record trotzdem unter der echten ID fuehren.
                 report["source_match_id"] = out_path.stem
@@ -237,6 +253,11 @@ class PostgameWatcher:
         # durch den vollen Match-V5-Report ersetzt hat.
         self._report_lock = threading.Lock()
         self._last_report = None
+        # Fortschritt des LAUFENDEN Stufe-2-Laufs (Snapshot-Dict, s.
+        # app/postgame/progress.py) oder None, wenn gerade keiner laeuft -
+        # insbesondere waehrend der langen Pause vor dem Zweitversuch. Reiner
+        # Anzeige-Zustand: nichts davon landet im Report oder im Trend-Record.
+        self._progress = None
 
     # --- Gating -------------------------------------------------------------
     @property
@@ -270,21 +291,36 @@ class PostgameWatcher:
             self._last_report = {"path": out_path, "written_at": written_at,
                                  "enriched": enriched}
 
+    def _set_progress(self, snapshot) -> None:
+        """Fortschritt des laufenden Stufe-2-Laufs setzen (None = kein Lauf).
+
+        Wird als `on_change`-Senke eines `Progress`-Objekts benutzt und laeuft
+        damit auf dem Stufe-2-Thread; der lesende Frontend-Handler nimmt
+        denselben Lock wie beim Report-Zustand."""
+        with self._report_lock:
+            self._progress = snapshot
+
     def last_report(self) -> dict | None:
         """Thread-sicherer Lese-Zugriff fuer /api/state. Liefert None ohne Report
         ODER wenn die Datei inzwischen fehlt (manuell geloescht) - so wirft ein
         toter Link nie einen 500, sondern verschwindet einfach aus dem State.
-        Sonst {"url": "/reports/<datei>", "written_at": <iso>, "enriched": bool}."""
+        Sonst {"url": "/reports/<datei>", "written_at": <iso>, "enriched": bool,
+        "progress": <Snapshot|None>}.
+
+        `progress` ist der Stand des gerade laufenden Report-Neubaus (Ladebalken
+        im Frontend) und None, sobald keiner laeuft - dann faellt die Anzeige auf
+        den reinen Banner zurueck."""
         with self._report_lock:
             rep = self._last_report
             if rep is None:
                 return None
             path, written_at, enriched = (rep["path"], rep["written_at"],
                                           rep["enriched"])
+            progress = self._progress
         if not path.exists():
             return None
         return {"url": f"/reports/{path.name}", "written_at": written_at,
-                "enriched": enriched}
+                "enriched": enriched, "progress": progress}
 
     # --- Poll-Verarbeitung --------------------------------------------------
     def observe(self, raw) -> None:
@@ -354,16 +390,25 @@ class PostgameWatcher:
         Gibt Stufe 2 auf (Budget erschoepft / kein Roster-Treffer) und ist dies
         der ERSTE Anlauf, wird EIN verzoegerter Zweitversuch eingeplant (Riot
         indexiert manche Matches schlicht spaeter). Der Zweitversuch (`is_retry`)
-        gibt bei erneutem Fehlschlag endgueltig auf - keine Endlosschleife."""
+        gibt bei erneutem Fehlschlag endgueltig auf - keine Endlosschleife.
+
+        Der Fortschritt gilt genau fuer DIESEN Lauf: er entsteht hier neu und
+        wird im `finally` auf jedem Ausgang wieder geloescht (Erfolg, Scheitern,
+        Exception). Waehrend der 600-s-Pause bis zum Zweitversuch laeuft nichts,
+        also zeigt das Frontend dort auch keinen Balken."""
+        progress = Progress(plan=_STAGE2_PLAN, on_change=self._set_progress)
         try:
-            # `is_retry` als Keyword durchgereicht - der Seam muss es annehmen
-            # (Default-Impl. und Test-Fakes tun das ueber **kw).
+            # `is_retry`/`progress` als Keyword durchgereicht - der Seam muss sie
+            # annehmen (Default-Impl. und Test-Fakes tun das ueber **kw).
             enriched = bool(self._enrich_stage2(self.cfg, result, out_path,
-                                                self._log, is_retry=is_retry))
+                                                self._log, is_retry=is_retry,
+                                                progress=progress))
         except (Exception, SystemExit) as exc:
             self._log(f"[postgame] Stufe-2-Upgrade fehlgeschlagen ({exc}) - "
                       f"Report bleibt key-frei.")
             enriched = False
+        finally:
+            self._set_progress(None)
         if enriched:
             # Datei wurde in place durch den vollen Match-Report ersetzt ->
             # Report-Zustand nachziehen, damit der Frontend-Button die Badge zeigt.

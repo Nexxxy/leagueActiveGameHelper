@@ -479,6 +479,21 @@ def _postgame_report():
     return _WATCHER.last_report()
 
 
+@app.get("/api/postgame/progress")
+def get_postgame_progress():
+    """Nur der Report-Zustand samt Fortschritt (`progress`) - fuer den Ladebalken.
+
+    WARUM ein eigener Mini-Endpunkt statt eines schnelleren /api/state-Pollings:
+    /api/state baut je Aufruf den kompletten Live-Zustand (Live-Client-Fetch +
+    Wissensbasis + Empfehlungen). Waehrend eines Report-Neubaus fragt das
+    Frontend aber im Sekundenbereich nach - hier ist die Antwort ein
+    Dict-Lookup unter Lock, ohne jeden Live-Client-Zugriff.
+
+    Identisch zu `postgame_report` in /api/state (Dict oder null), damit beide
+    Wege dieselbe Form liefern und das Frontend nur EINE Render-Funktion hat."""
+    return _postgame_report()
+
+
 class PriorityUpdate(BaseModel):
     champion: str
     priority: str  # low | medium | high | urgent
@@ -582,8 +597,8 @@ def get_history(player: str | None = None):
     except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
         print(f"Warnung: Match-History nicht lesbar ({exc})")
         return {"games": [], "wins": 0, "losses": 0, "unknown": 0,
-                "winrate_pct": None, "player": None, "default_player": None,
-                "players": [], "error": str(exc)}
+                "winrate_pct": None, "batch": None, "player": None,
+                "default_player": None, "players": [], "error": str(exc)}
 
 
 @app.post("/api/history/{match_id}/retry")
@@ -654,12 +669,17 @@ def get_history_load_state(match_id: str):
     """Zustand eines manuellen Ladelaufs ("running"/"done"/"failed:<grund>"/null).
 
     Eigener Endpoint, weil ein fehlgeschlagener Frisch-Load KEINE Datei
-    hinterlaesst - er taucht also in /api/history gar nicht auf."""
+    hinterlaesst - er taucht also in /api/history gar nicht auf.
+
+    `progress` traegt denselben Ladebalken-Snapshot wie die Zeilen in
+    /api/history (null, wenn gerade nichts laeuft) - das Load-Formular zeigt
+    damit denselben Balken wie ein Retry."""
     try:
-        return {"state": history.retry_state(match_id)}
+        return {"state": history.retry_state(match_id),
+                "progress": history.retry_progress(match_id)}
     except Exception as exc:   # noqa: BLE001 - Endpoint darf nie 500 werfen
         print(f"Warnung: Ladezustand {match_id} nicht lesbar ({exc})")
-        return {"state": None, "error": str(exc)}
+        return {"state": None, "progress": None, "error": str(exc)}
 
 
 @app.post("/api/history/retry-all")

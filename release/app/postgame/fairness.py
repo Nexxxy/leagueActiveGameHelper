@@ -55,6 +55,9 @@ import statistics
 from core import ddragon, shardstore
 
 from . import fetch
+# Direkt-Import: der Parameter heisst selbst `progress` und wuerde das Modul
+# im Funktionskoerper verdecken.
+from .progress import NOOP
 
 # --- Rang-Skala -------------------------------------------------------------
 # score = tier_index * 400 + division_index * 100 + LP. Master+ traegt keine
@@ -454,17 +457,22 @@ class RankLookup:
         return rank_from_entries(entries)
 
 
-def ranks_for(lookup: RankLookup, riot_ids) -> dict:
+def ranks_for(lookup: RankLookup, riot_ids, *, progress=NOOP) -> dict:
     """{Riot-ID: Rang-Dict|None} fuer eine Folge von Riot-IDs.
 
     Bewusst Riot-ID- statt PUUID-basiert (Abweichung vom ersten Plan-Entwurf):
     die PUUIDs im Match stammen moeglicherweise aus dem Cache und gehoeren dann
-    einem fremden Key - s. Identitaets-Regel im Modul-Docstring."""
+    einem fremden Key - s. Identitaets-Regel im Modul-Docstring.
+
+    `progress` bekommt je aufgeloester Riot-ID einen `tick()` - auch bei einem
+    Cache-Treffer: fuer den Ladebalken zaehlt, dass der Spieler erledigt ist,
+    nicht ob er einen Call gekostet hat."""
     out: dict = {}
     for rid in riot_ids:
         if not rid or rid in out:
             continue
         out[rid] = lookup.rank_by_riot_id(rid)
+        progress.tick()
     return out
 
 
@@ -724,21 +732,42 @@ def _verdict(mean: dict, autofill: dict, flex: int, estimated: int,
     return lines
 
 
+def _skip_rank_phases(progress) -> None:
+    """Beide Rang-Phasen aus dem Fortschritts-Plan nehmen.
+
+    Gilt fuer jeden Weg, auf dem die Sektion keinen einzigen Riot-Call macht
+    (abgeschaltet, keine Participants, Remake, kein Client): der Balken soll
+    dann nicht bei 25 % haengen bleiben, sondern die restlichen Phasen den
+    ganzen Weg abdecken."""
+    progress.skip("ranks")
+    progress.skip("estimate")
+
+
 def build_fairness(cfg, match: dict, my_team: int, me_pid, *, match_id=None,
-                   client=None, log=print) -> dict | None:
+                   client=None, log=print, progress=NOOP) -> dict | None:
     """Fairness-Modell fuer den Report - oder None, wenn die Sektion entfaellt.
 
     None kommt bei abgeschalteter Sektion (`postgame.fairness: false`), bei
     einem Remake (Guard VOR jeder Identitaets-Aufloesung, also 0 Calls) und
     bei einem Match ohne Participants. Alles Uebrige degradiert: ohne API-Key
-    bleiben die Rang-Spalten leer, die Rollen-Wahl steht trotzdem da."""
+    bleiben die Rang-Spalten leer, die Rollen-Wahl steht trotzdem da.
+
+    `progress` ist der Ladebalken-Transport: diese Sektion macht praktisch alle
+    Riot-Calls des Reports und traegt darum die beiden teuersten Phasen
+    ("ranks"/"estimate"). Faellt eine davon aus (kein Client, kein unranked
+    Spieler, Sektion entfaellt ganz), wird sie mit `skip()` aus dem Plan
+    genommen - ihr Anteil verteilt sich dann auf die uebrigen Phasen, statt als
+    Luecke im Balken zu bleiben."""
     if not getattr(cfg, "postgame_fairness", True):
+        _skip_rank_phases(progress)
         return None
     info = (match or {}).get("info") or {}
     parts = info.get("participants") or []
     if not parts:
+        _skip_rank_phases(progress)
         return None
     if is_remake(info):
+        _skip_rank_phases(progress)
         return None
 
     if client is None:
@@ -748,9 +777,17 @@ def build_fairness(cfg, match: dict, my_team: int, me_pid, *, match_id=None,
 
     lookup = None
     ranks: dict = {}
-    if client is not None:
+    if client is None:
+        # Ohne Client kostet die Sektion keinen einzigen Call - beide
+        # Rang-Phasen entfallen, die Sektion selbst entsteht trotzdem
+        # (Rollen-Wahl + Level sind offline da).
+        _skip_rank_phases(progress)
+    else:
         lookup = RankLookup(cfg, client, log=log)
-        ranks = ranks_for(lookup, [riot_id_of(p) for p in parts])
+        riot_ids = [riot_id_of(p) for p in parts]
+        progress.phase("ranks", "Ränge {done}/{total}",
+                       total=len({r for r in riot_ids if r}))
+        ranks = ranks_for(lookup, riot_ids, progress=progress)
 
     # --- Peer-Schaetzung fuer alles, was weder Solo noch Flex hat ------------
     budget_note = None
@@ -762,21 +799,32 @@ def build_fairness(cfg, match: dict, my_team: int, me_pid, *, match_id=None,
                     if riot_id_of(p) and not ranks.get(riot_id_of(p))]
         estimate_wanted = len(unranked)
         if unranked:
+            progress.phase("estimate", "Rang-Schätzung {done}/{total}",
+                           total=estimate_wanted)
             lookup.start_budget(_budget_for(cfg))
             for part in unranked:
                 rid = riot_id_of(part)
                 if not lookup.has_budget():
+                    # Budget alle: der Zaehler bleibt stehen, wo er steht -
+                    # ehrlicher als ihn auf "fertig" zu ziehen.
                     break
                 guess = estimate_rank(cfg, lookup, lookup.puuid_for(rid),
                                       exclude=lobby)
                 if guess:
                     ranks[rid] = guess
                     estimate_done += 1
+                # Auch ohne Treffer ist dieser Spieler abgearbeitet (er kostete
+                # trotzdem Calls) - der Balken zaehlt Spieler, nicht Erfolge.
+                progress.tick(note=f"Calls {lookup.spent}/{lookup.budget}")
             lookup.start_budget(None)
             if lookup.budget_exhausted and estimate_done < estimate_wanted:
                 budget_note = (f"Schätzung für {estimate_done} von "
                                f"{estimate_wanted} Spielern — danach war das "
                                f"Call-Budget erschöpft.")
+    if lookup is not None and not estimate_wanted:
+        # Nichts zu schaetzen (voll eingestufte Lobby oder Schaetzung
+        # abgeschaltet) -> Phase raus aus dem Plan.
+        progress.skip("estimate")
 
     # --- Paare je Rolle (analog analysis.build_scoreboard) -------------------
     from . import analysis   # lokal: vermeidet einen Import-Zyklus beim Laden

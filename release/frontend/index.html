@@ -268,6 +268,30 @@
   #reportBanner .report-badge { display: inline-block; margin-left: 12px;
     padding: 2px 12px; border-radius: 20px; vertical-align: middle;
     font-size: .78rem; font-weight: 600; background: rgba(16, 20, 26, .28); }
+  /* Ladebalken des laufenden Report-Neubaus, direkt unter dem Banner. Bewusst
+     DEZENT (duenner Strich + gemutete Zeile): das Banner bleibt der Blickfang,
+     der Balken sagt nur "es arbeitet noch, so weit ist es".
+     Die Klassen .bar/.fill heissen genauso wie in history.html, damit beide
+     Seiten wie EIN System aussehen - hier aber unter #reportProgress gehaengt,
+     weil .bar auf dieser Seite schon dem AD/AP-Split der Gegnerkarten gehoert.
+     [hidden] wieder explizit pinnen (gleiche Falle wie beim Banner: eigenes
+     display wuerde das UA-display:none schlagen).
+     Negativer oberer Rand: er wird mit dem 18px-Rand des Banners verrechnet,
+     damit Balken und Banner als EIN Block zusammenstehen. */
+  #reportProgress[hidden] { display: none; }
+  #reportProgress { display: block; margin: -8px 0 18px; }
+  #reportProgress .bar { display: block; height: 6px; border-radius: 3px;
+    background: var(--border); overflow: hidden; }
+  #reportProgress .fill { display: block; height: 100%; border-radius: 3px;
+    background: var(--accent); transition: width .3s ease; }
+  /* Unbestimmte Phase (Warten auf die Riot-Indexierung): es gibt nichts zu
+     zaehlen, also laeuft ein Streifen durch, statt einen Fortschritt zu
+     behaupten, den niemand kennt. */
+  #reportProgress .bar.indeterminate .fill {
+    animation: progslide 1.5s ease-in-out infinite; }
+  @keyframes progslide { from { margin-left: -35%; } to { margin-left: 100%; } }
+  #reportProgress .plabel { color: var(--muted); font-size: .8rem;
+    margin-top: 4px; }
   /* Link auf die Match-History-Seite: bewusst DEZENT (Sekundaer-Button, kein
      Verlauf/Glow) - er steht immer unten und darf dem Report-Banner nicht die
      Aufmerksamkeit nehmen. Immer sichtbar, also kein [hidden]-Handling noetig. */
@@ -344,6 +368,11 @@
   </div>
 
   <a id="reportBanner" href="#" target="_blank" rel="noopener" hidden></a>
+
+  <!-- Ladebalken des Report-Neubaus: eigener Block NEBEN dem Banner, nicht
+       darin - im <a> waere er Teil der Klickflaeche. Inhalt baut
+       renderReport(), sichtbar nur solange der Server einen Snapshot liefert. -->
+  <div id="reportProgress" hidden></div>
 
   <div id="nogame" hidden>Kein aktives Spiel gefunden – warte auf Spielstart …</div>
 
@@ -547,6 +576,80 @@ function teamGoldLine(tg) {
     .join(`<span class="tgsep">|</span>`);
 }
 
+// --- Report-Banner + Ladebalken ---------------------------------------------
+// EINE Funktion fuer beides: Banner und Balken kommen aus demselben Stueck
+// Payload (`postgame_report`) und haengen an derselben Bedingung. Sie wird aus
+// zwei Quellen gefuettert - dem normalen /api/state-Refresh und dem
+// 3-s-Polling auf /api/postgame/progress; der Mini-Endpunkt kennt die Phase
+// nicht, die kommt deshalb als zweites Argument mit (lastPhase).
+function renderReport(rep, phase) {
+  // "Match-Report bereit"-Button: nur ausserhalb des laufenden Spiels zeigen
+  // (Endscreen = no_game/post_game). Waehrend ein Spiel laeuft (in_game) hat die
+  // Live-Ansicht Vorrang -> Button ausgeblendet. Link oeffnet in neuem Tab; bei
+  // Stufe-2-Aufwertung eine Zusatz-Badge "inkl. Schaden-Analyse".
+  const banner = document.getElementById("reportBanner");
+  if (rep && rep.url && phase !== "in_game") {
+    banner.href = rep.url;
+    banner.innerHTML = "📊 Match-Report bereit"
+      + (rep.enriched ? '<span class="report-badge">inkl. Schaden-Analyse</span>' : "");
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+
+  // Balken nur, solange ein Neubau wirklich laeuft (`progress` gesetzt) - ist
+  // er durch, liefert der Server null und die Anzeige faellt auf den blossen
+  // Banner zurueck. Die Beschriftung kommt FERTIG vom Server ("Ränge 4/10"),
+  // das Frontend formuliert nichts selbst und escaped nur.
+  const box = document.getElementById("reportProgress");
+  const pr = rep && rep.progress;
+  if (pr && phase !== "in_game") {
+    // Unbestimmt (Warten auf Riot): der Streifen laeuft, `pct` waere hier nur
+    // der eingefrorene Stand von vorher - dann lieber gar keine Zahl zeigen.
+    const pct = Math.max(0, Math.min(100, Number(pr.pct) || 0));
+    box.innerHTML =
+      `<div class="bar${pr.indeterminate ? " indeterminate" : ""}"
+         ><span class="fill" style="width:${pr.indeterminate ? 35 : pct}%"></span></div>
+       <div class="plabel">${esc(pr.label)}</div>`;
+    box.hidden = false;
+    startProgressPoll();
+  } else {
+    box.hidden = true;
+    box.innerHTML = "";
+  }
+}
+
+// Waehrend eines Neubaus reicht der normale Refresh nicht: ein Balken, der alle
+// 60 s springt, ist nutzlos. Deshalb eine eigene, kurze Kadenz - aber NUR
+// solange etwas laeuft, und auf dem Mini-Endpunkt, der bloss ein Dict unter
+// Lock liest (kein Live-Client-Fetch wie /api/state).
+const PROGRESS_MS = 3000;
+let progressTimer = null;
+let lastPhase = null;   // Phase des letzten /api/state - /api/postgame/progress kennt sie nicht
+
+function startProgressPoll() {
+  if (progressTimer) return;   // nie zwei Schleifen parallel
+  progressTimer = setTimeout(pollProgress, PROGRESS_MS);
+}
+
+async function pollProgress() {
+  progressTimer = null;
+  let rep;
+  try {
+    rep = await (await fetch("/api/postgame/progress")).json();
+  } catch (err) {
+    // Server kurz weg -> beim naechsten Tick erneut; der Lauf im Server geht ja
+    // weiter, ein Abbruch der Schleife wuerde den Balken fuer immer einfrieren.
+    progressTimer = setTimeout(pollProgress, PROGRESS_MS);
+    return;
+  }
+  // Aus GENAU dieser Antwort neu rendern: ist der Lauf fertig (progress null),
+  // steht die Badge "inkl. Schaden-Analyse" damit sofort da, statt bis zum
+  // naechsten 60-s-Refresh zu warten. Laeuft er weiter, startet renderReport
+  // die Schleife selbst neu.
+  renderReport(rep, lastPhase);
+}
+
 function render(s) {
   if (s.refresh_seconds) REFRESH_MS = s.refresh_seconds * 1000;
   const game = s.phase === "in_game" || s.phase === "post_game";
@@ -562,19 +665,10 @@ function render(s) {
   if (s.phase === "post_game") meta += " · Spiel beendet – letzter Stand";
   document.getElementById("meta").textContent = meta;
 
-  // "Match-Report bereit"-Button: nur ausserhalb des laufenden Spiels zeigen
-  // (Endscreen = no_game/post_game). Waehrend ein Spiel laeuft (in_game) hat die
-  // Live-Ansicht Vorrang -> Button ausgeblendet. Link oeffnet in neuem Tab; bei
-  // Stufe-2-Aufwertung eine Zusatz-Badge "inkl. Schaden-Analyse".
-  const rep = s.postgame_report, banner = document.getElementById("reportBanner");
-  if (rep && rep.url && s.phase !== "in_game") {
-    banner.href = rep.url;
-    banner.innerHTML = "📊 Match-Report bereit"
-      + (rep.enriched ? '<span class="report-badge">inkl. Schaden-Analyse</span>' : "");
-    banner.hidden = false;
-  } else {
-    banner.hidden = true;
-  }
+  // Banner + Ladebalken: die Phase wird gemerkt, weil das Progress-Polling sie
+  // nicht mitgeliefert bekommt (der Mini-Endpunkt kennt nur den Report).
+  lastPhase = s.phase;
+  renderReport(s.postgame_report, s.phase);
 
   if (!game) return;
 

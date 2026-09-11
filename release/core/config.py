@@ -106,7 +106,6 @@ class Config:
     seed_ttl_hours: int = 24        # TTL fuer den Seed-Cache (players_*.json);
                                     # 0 = nie ablaufen (altes Verhalten)
     ids_per_player: int = 20        # wie viele Match-IDs pro Spieler
-    max_matches: int = 3000         # Ziel: so viele Matches des aktuellen Patches
     min_games: int = 10             # Mindest-Sample pro Champion+Rolle im Output
     rate_limit_per_sec: int = 20
     rate_limit_per_2min: int = 100
@@ -188,6 +187,17 @@ class Config:
             fallback = (self.api_key,) if self.api_key else ()
             return (self.dev_api_key,), fallback
         return self.active_api_keys, ()
+
+    @property
+    def platforms(self) -> tuple[str, ...]:
+        """Plattformen aller konfigurierten Regionen (`regions`), in Reihenfolge.
+
+        Fallback auf die einzelne `platform`, solange `regions` leer ist: der
+        Loader fuellt den Block zwar immer (s. `load`), ein direkt gebautes
+        `Config()` - Tests, Skripte - hat ihn aber nicht. Alles, was je Region
+        eine Datei anfasst (Seed-Caches in `carryover`/`status`), fragt hier.
+        """
+        return tuple(p for p, _routing in self.regions) or (self.platform,)
 
     @property
     def seed_steps(self) -> tuple[str, ...]:

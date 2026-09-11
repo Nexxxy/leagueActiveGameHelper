@@ -3,6 +3,12 @@
 Personal-Key-Limits: 20 Requests/Sekunde und 100 Requests/2 Minuten.
 Der Client drosselt selbst und respektiert zusätzlich Retry-After bei 429.
 Unterstuetzt mehrere API-Keys im Round-Robin (eigener Rate-Limit-Bucket je Key).
+
+Strg-C (`stop_event`): die Crawl-Kommandos haengen dem Client nachtraeglich ihr
+`threading.Event` an (wie `client.log`). Ist es gesetzt, nutzt der Client die
+noch freie Quota auf, wartet aber NIE auf ein neues Rate-Fenster: muesste der
+naechste Request laenger als `STOP_MAX_WAIT_S` warten, wirft er `CrawlStopped`
+statt zu schlafen. Ohne Event (App, Skripte) verhaelt sich alles wie zuvor.
 """
 
 import sys
@@ -10,6 +16,19 @@ import time
 from collections import deque
 
 import requests
+
+
+class CrawlStopped(Exception):
+    """Stopp angefordert und der naechste Request muesste auf den
+    Rate-Limiter warten."""
+
+
+# Schwelle zwischen "Taktung" und "Fenster": Wartezeiten bis hierhin stammen vom
+# Per-Sekunde-Limit (20/s) und werden auch nach Strg-C noch abgewartet - alles
+# darueber ist das 2-Minuten-Fenster und beendet den Lauf (CrawlStopped).
+# Bewusst unter `focus.WAIT_ABORT_S` (5 s): hier geht es um "warten oder nicht",
+# dort um "lohnt sich ein neues Fenster".
+STOP_MAX_WAIT_S = 1.0
 
 
 def _default_log(msg: str) -> None:
@@ -42,6 +61,15 @@ class RiotClient:
         # gesetzt, damit fremde prints den Statusblock nicht zerreissen. Als
         # Attribut nachtraeglich ueberschreibbar (client.log = board.log).
         self.log = log if log is not None else _default_log
+        # `stop_event` (threading.Event | None): Strg-C-Signal des Laufs, von den
+        # Crawl-Kommandos nachtraeglich gesetzt (client.stop_event = stop_event,
+        # genau wie `log`). Gesetzt heisst: freie Quota noch aufbrauchen, aber
+        # nie mehr auf ein Rate-Fenster warten (s. `_throttle`/`CrawlStopped`).
+        # None -> Verhalten exakt wie ohne Stopp (App, Skripte, Tests).
+        self.stop_event = None
+        # Requests, die nach gesetztem `stop_event` noch rausgingen - die
+        # Region-Worker nennen die Zahl in ihrer Abschlusszeile.
+        self.requests_since_stop = 0
         # api_key: einzelner String ODER Liste/Tuple von Strings.
         if isinstance(api_key, str):
             raw = [api_key]
@@ -111,6 +139,22 @@ class RiotClient:
         self._rr += 1
         return idx
 
+    def _stopping(self) -> bool:
+        """True, wenn ein Stopp angefordert ist (Strg-C bzw. globaler Abbruch)."""
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def _pick_key(self) -> int | None:
+        """Key fuer den naechsten Request; None, wenn keiner mehr aktiv ist.
+
+        Regulaer Round-Robin (`_next_key`). NACH einem Stopp dagegen der aktive
+        Key mit der GERINGSTEN Wartezeit: sonst koennte ein zufaellig voller
+        Bucket den Lauf beenden, obwohl der zweite Key noch freie Quota hat -
+        und genau die soll nach Strg-C ja noch aufgebraucht werden."""
+        if not self._active or not self._stopping():
+            return self._next_key()
+        now = time.monotonic()
+        return min(self._active, key=lambda i: self._wait_for_key(i, now))
+
     def _disable_key(self, key_idx: int) -> None:
         """Key dauerhaft aus der Rotation entfernen."""
         if key_idx in self._active:
@@ -120,20 +164,68 @@ class RiotClient:
 
     # ---- Rate-Limiting -------------------------------------------------
 
+    def _wait_for_key(self, key_idx: int, now: float) -> float:
+        """Wartezeit dieses Keys in Sekunden; 0.0 = sofort ein Slot frei.
+
+        Read-only (raeumt den Bucket NICHT auf) - genau deshalb teilen sich
+        `_throttle` (blockierend), `wait_seconds` (Vorschau) und `_pick_key`
+        (Key-Wahl nach einem Stopp) dieselbe Rechnung."""
+        bucket = self._sent[key_idx]
+        waits = [0.0]
+        for count, window in self.LIMITS:
+            recent = [t for t in bucket if now - t <= window]
+            if len(recent) >= count:
+                waits.append(window - (now - recent[0]))
+        return max(waits)
+
     def _throttle(self, key_idx: int) -> None:
+        """Wartet, bis dieser Key wieder einen Slot frei hat.
+
+        Nach einem Stopp (`stop_event` gesetzt) wird NIE auf ein neues
+        Rate-Fenster gewartet: ist die Wartezeit groesser als `STOP_MAX_WAIT_S`,
+        fliegt `CrawlStopped`. Kuerzere Wartezeiten (Per-Sekunde-Taktung) werden
+        auch dann abgesessen - der Request geht noch raus.
+
+        Ohne gesetztes Event, aber MIT Event-Objekt wird ueber `Event.wait`
+        pausiert statt ueber `time.sleep`: Strg-C mitten in der 110-s-Pause weckt
+        den Worker sofort, die Schleife rechnet neu und endet dann an derselben
+        Regel. Ohne Event-Objekt bleibt es beim `time.sleep` wie zuvor."""
         bucket = self._sent[key_idx]
         while True:
             now = time.monotonic()
             while bucket and now - bucket[0] > 120:
                 bucket.popleft()
-            waits = []
-            for count, window in self.LIMITS:
-                recent = [t for t in bucket if now - t <= window]
-                if len(recent) >= count:
-                    waits.append(window - (now - recent[0]))
-            if not waits:
+            wait = self._wait_for_key(key_idx, now)
+            if wait <= 0:
                 return
-            time.sleep(max(waits) + 0.05)
+            pause = wait + 0.05
+            if self.stop_event is None:
+                time.sleep(pause)
+            elif self.stop_event.is_set():
+                if wait > STOP_MAX_WAIT_S:
+                    raise CrawlStopped(
+                        f"Stopp angefordert, naechster Request muesste "
+                        f"{wait:.0f}s auf das Rate-Fenster warten.")
+                # Kurze Taktungs-Pause: hier hilft `Event.wait` nicht (es ist ja
+                # schon gesetzt und kaeme sofort zurueck -> Leerlauf-Schleife).
+                time.sleep(pause)
+            else:
+                # Rueckgabe True heisst "Event waehrend der Pause gesetzt" - die
+                # naechste Runde wendet dieselbe Regel auf den Rest an.
+                self.stop_event.wait(pause)
+
+    def _retry_sleep(self, seconds: float) -> None:
+        """Backoff-Pause in `_get` (429, 5xx, Verbindungsfehler).
+
+        Nach einem Stopp gibt es keinen Retry mehr: ein 429 heisst ohnehin "im
+        Limit", und ein 5xx-Retry nach einem gewollten Abbruch bringt nichts ->
+        `CrawlStopped`. Dasselbe gilt, wenn das Event waehrend der Pause gesetzt
+        wird. Ohne Event-Objekt: `time.sleep` wie zuvor."""
+        if self.stop_event is None:
+            time.sleep(seconds)
+            return
+        if self.stop_event.is_set() or self.stop_event.wait(seconds):
+            raise CrawlStopped("Stopp angefordert - kein Retry mehr.")
 
     def wait_seconds(self) -> float:
         """Nicht-blockierende Vorschau: wie viele Sekunden muesste `_throttle`
@@ -142,26 +234,16 @@ class RiotClient:
 
         Gleiche Fenster-Logik wie `_throttle` (beide LIMITS: per-Sekunde und
         per-2min), aber read-only. Bei mehreren aktiven Keys wird das MINIMUM
-        ueber die aktiven Buckets geliefert: `_get` holt sich den naechsten Key
-        per Round-Robin (`_next_key`) und drosselt DIESEN Bucket - der guenstigste
-        aktive Key bestimmt also, wie lange man realistisch spaetestens warten
-        muss. Ohne aktiven Key -> 0.0 (die Wartefrage ist dann ohnehin
-        gegenstandslos; `_get` laeuft in den SystemExit fuer 'alle Keys weg')."""
+        ueber die aktiven Buckets geliefert: `_get` holt sich seinen Key ueber
+        `_pick_key` und drosselt DIESEN Bucket - der guenstigste aktive Key
+        bestimmt also, wie lange man realistisch spaetestens warten muss (nach
+        einem Stopp waehlt `_pick_key` genau ihn). Ohne aktiven Key -> 0.0 (die
+        Wartefrage ist dann ohnehin gegenstandslos; `_get` laeuft in den
+        SystemExit fuer 'alle Keys weg')."""
         if not self._active:
             return 0.0
         now = time.monotonic()
-        best = None
-        for key_idx in self._active:
-            bucket = self._sent[key_idx]
-            waits = [0.0]
-            for count, window in self.LIMITS:
-                recent = [t for t in bucket if now - t <= window]
-                if len(recent) >= count:
-                    waits.append(window - (now - recent[0]))
-            wait = max(waits)
-            if best is None or wait < best:
-                best = wait
-        return best if best is not None else 0.0
+        return min(self._wait_for_key(key_idx, now) for key_idx in self._active)
 
     def _get(self, host: str, path: str, params: dict | None = None,
              endpoint: str | None = None):
@@ -201,7 +283,14 @@ class RiotClient:
         Bewusst ALLE Statuscodes >= 500 (nicht nur 500/502/503/504) als
         transient behandeln: Riot laeuft hinter Cloudflare, das eigene
         5xx-Codes liefert (520/521/522/524). Die wurden frueher bis
-        raise_for_status() durchgereicht und rissen den ganzen Fetch ab."""
+        raise_for_status() durchgereicht und rissen den ganzen Fetch ab.
+
+        Ist ein Stopp angefordert (`stop_event`), kann statt eines Ergebnisses
+        `CrawlStopped` fliegen: sobald der naechste Request auf das Rate-Fenster
+        warten muesste (s. `_throttle`) oder ein Retry anstuende (s.
+        `_retry_sleep`). BEWUSST eine Ausnahme und kein None: None ist hier das
+        Signal fuer 404, und die Fetch-Schleifen wuerden daraufhin einen
+        `not_found`-Skip-Marker in den Cache schreiben."""
         self.last_status = None
         label = endpoint or path
         if label in self._dead_endpoints:
@@ -212,18 +301,22 @@ class RiotClient:
             return None
         url = f"https://{host}{path}"
         for attempt in range(8):
-            key_idx = self._next_key()
+            key_idx = self._pick_key()
             if key_idx is None:
                 raise SystemExit(_NO_KEYS)
             self._throttle(key_idx)
             self._sent[key_idx].append(time.monotonic())
+            if self._stopping():
+                # Zaehlt, was nach dem Abbruch noch an freier Quota rausging -
+                # die Region-Worker nennen die Zahl in ihrer Schluss-Zeile.
+                self.requests_since_stop += 1
             try:
                 resp = self._session.get(
                     url, params=params, timeout=15,
                     headers={"X-Riot-Token": self._keys[key_idx]},
                 )
             except requests.RequestException:
-                time.sleep(3 * (attempt + 1))
+                self._retry_sleep(3 * (attempt + 1))
                 continue
             self.last_status = resp.status_code
             if resp.status_code not in (401, 403):
@@ -236,11 +329,11 @@ class RiotClient:
                 return resp.json()
             if resp.status_code == 429:
                 retry = int(resp.headers.get("Retry-After", "10"))
-                time.sleep(retry + 1)
+                self._retry_sleep(retry + 1)
                 continue
             if resp.status_code >= 500:
                 # Alle 5xx (inkl. Cloudflare 520/521/522/524) sind transient.
-                time.sleep(2 * (attempt + 1))
+                self._retry_sleep(2 * (attempt + 1))
                 continue
             if resp.status_code == 404:
                 return None

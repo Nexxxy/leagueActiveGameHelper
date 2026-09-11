@@ -20,6 +20,9 @@ from core.config import Config
 # Submodul im Paket sonst erst zur Laufzeit bemerken.
 from . import (analysis, build_replay, capture, enrich, fairness,  # noqa: F401
                fetch, live_series, render, series, trend)
+# Direkt-Import statt `progress.NOOP`: der Parameter der Bau-Funktionen heisst
+# selbst `progress` und wuerde das Modul im Funktionskoerper verdecken.
+from .progress import NOOP
 
 # Version des Report-Generators - die EINZIGE Quelle dafuer.
 # Bei JEDER inhaltlichen Aenderung am Report-Inhalt oder -Layout um 1 erhoehen:
@@ -84,11 +87,19 @@ def _load_core_sets(cfg: Config, patch: str) -> dict:
 
 
 def build_report(cfg: Config, match_id: str, *, me: str | None = None,
-                 retries: int = 0, backoff: float = 15.0, log=print) -> dict:
+                 retries: int = 0, backoff: float = 15.0, log=print,
+                 progress=NOOP) -> dict:
     """Baut das Report-Modell (Dict) fuer eine Match-ID. Reine Datenaufbereitung
-    ohne HTML - so bleibt der Renderer entkoppelt und die Logik testbar."""
+    ohne HTML - so bleibt der Renderer entkoppelt und die Logik testbar.
+
+    `progress` ist der Ladebalken-Transport (s. `progress.py`): der Bau meldet
+    seine Phasen (Laden -> Auswerten -> Raenge/Schaetzung -> Schreiben) an ein
+    `Progress`-Objekt des Aufrufers. Default `NOOP` - der CLI-Pfad und jeder
+    Alt-Aufruf laufen damit unveraendert."""
+    progress.phase("load", "Match & Timeline laden")
     patch, match, timeline = fetch.load_match_and_timeline(
         cfg, match_id, retries=retries, backoff=backoff, log=log)
+    progress.phase("analyze", "Verlauf auswerten")
     info = match["info"]
     parts = info["participants"]
 
@@ -284,7 +295,8 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
     remake = fairness.is_remake(info)
     try:
         fair = fairness.build_fairness(cfg, match, my_team, me_pid,
-                                       match_id=match_id, log=log)
+                                       match_id=match_id, log=log,
+                                       progress=progress)
     except Exception as exc:   # noqa: BLE001 - Fairness-Sektion ist optional
         log(f"[postgame] Fairness-Sektion uebersprungen ({exc!r}).")
         fair = None
@@ -327,6 +339,10 @@ def build_report(cfg: Config, match_id: str, *, me: str | None = None,
     if fair:
         report["fairness"] = fair
     _attach_trend_line(cfg, report, log=log)
+    # Letzte Phase: das Modell steht, es fehlt nur noch das Schreiben. Die Datei
+    # schreibt der AUFRUFER (run/Stufe 2/History-Retry) - er raeumt danach auch
+    # den Fortschritt weg.
+    progress.phase("write", "Report schreiben")
     return report
 
 
