@@ -226,7 +226,12 @@ class PostgameWatcher:
     Ablauf pro Spiel: jeder aktive SR-Poll fuettert das Capture; die Transition
     'aktiv -> None' friert das Capture ein (race-frei fuer die asynchrone Stufe
     2) und spawnt den Report. Gating: laeuft mit gesetztem Flag ausserhalb des
-    Demo-Modus; SR-Filter pro Poll. Key/`me` sind KEINE Voraussetzung mehr."""
+    Demo-Modus; SR-Filter pro Poll. Key/`me` sind KEINE Voraussetzung mehr.
+
+    Der Banner-Zustand (`last_report`) gehoert immer zum JUENGSTEN Spiel: der
+    Start eines neuen SR-Spiels leert ihn, und spaete Stufe-2-Laeufe aelterer
+    Spiele koennen ihn weder zurueckholen noch ihren Ladebalken darunter
+    zeigen."""
 
     def __init__(self, cfg, *, capture=None, render_stage1=None,
                  enrich_stage2=None, write_failed=None, spawn=None, log=print,
@@ -250,14 +255,20 @@ class PostgameWatcher:
         # (der Poll-/Stufe-2-Thread schreibt, der Frontend-Handler liest).
         # None = noch kein Report; sonst {"path": Path, "written_at": iso-str,
         # "enriched": bool}. `enriched` flippt auf True, sobald Stufe 2 die Datei
-        # durch den vollen Match-V5-Report ersetzt hat.
+        # durch den vollen Match-V5-Report ersetzt hat. Beim Start eines neuen
+        # SR-Spiels faellt der Eintrag auf None zurueck (s. `observe`), damit der
+        # Banner nach dessen Ende nie auf den Report des VORLETZTEN Spiels zeigt.
         self._report_lock = threading.Lock()
         self._last_report = None
-        # Fortschritt des LAUFENDEN Stufe-2-Laufs (Snapshot-Dict, s.
-        # app/postgame/progress.py) oder None, wenn gerade keiner laeuft -
-        # insbesondere waehrend der langen Pause vor dem Zweitversuch. Reiner
+        # Fortschritt LAUFENDER Stufe-2-Laeufe je Report-Datei (out_path ->
+        # Snapshot-Dict, s. app/postgame/progress.py). Kein Eintrag = gerade kein
+        # Lauf fuer diese Datei - insbesondere waehrend der langen Pause vor dem
+        # Zweitversuch. WARUM je Pfad statt eines globalen Slots: die Stufe 2
+        # (bzw. der 600-s-Zweitversuch) eines ALTEN Spiels kann noch laufen,
+        # waehrend schon der Report des naechsten Spiels steht - ihr Balken darf
+        # weder unter dessen Banner erscheinen noch dessen Balken loeschen. Reiner
         # Anzeige-Zustand: nichts davon landet im Report oder im Trend-Record.
-        self._progress = None
+        self._progress: dict = {}
 
     # --- Gating -------------------------------------------------------------
     @property
@@ -281,42 +292,61 @@ class PostgameWatcher:
         ERSTEN Verfuegbarkeit (Stufe 1) gesetzt; das Stufe-2-Upgrade schreibt
         DIESELBE Datei neu, behaelt aber den urspruenglichen Zeitpunkt und flippt
         nur `enriched`. Unter dem Report-Lock, damit der lesende Frontend-Handler
-        immer einen konsistenten Eintrag sieht."""
+        immer einen konsistenten Eintrag sieht.
+
+        Stufe 1 (`enriched=False`) setzt immer - sie IST der Report des gerade
+        beendeten Spiels. Das Upgrade (`enriched=True`) aktualisiert dagegen nur
+        den Eintrag DERSELBEN Datei, sonst ist es ein No-Op: eine spaete Stufe 2
+        (oder der 600-s-Zweitversuch) des vorigen Spiels darf den Banner nach dem
+        Reset beim Spielstart bzw. nach dem neuen Stufe-1-Report nicht wieder
+        auf den alten Report zurueckholen. Die Datei selbst ist trotzdem
+        aufgewertet - sie bleibt ueber die Match-History erreichbar."""
         with self._report_lock:
             prev = self._last_report
-            if prev is not None and prev["path"] == out_path:
+            same = prev is not None and prev["path"] == out_path
+            if enriched and not same:
+                return
+            if same:
                 written_at = prev["written_at"]
             else:
                 written_at = datetime.now().astimezone().isoformat()
             self._last_report = {"path": out_path, "written_at": written_at,
                                  "enriched": enriched}
 
-    def _set_progress(self, snapshot) -> None:
-        """Fortschritt des laufenden Stufe-2-Laufs setzen (None = kein Lauf).
+    def _set_progress(self, out_path, snapshot) -> None:
+        """Fortschritt des Stufe-2-Laufs fuer `out_path` setzen (None = Lauf
+        vorbei, Eintrag entfernen).
 
-        Wird als `on_change`-Senke eines `Progress`-Objekts benutzt und laeuft
-        damit auf dem Stufe-2-Thread; der lesende Frontend-Handler nimmt
-        denselben Lock wie beim Report-Zustand."""
+        Gebunden an `out_path` die `on_change`-Senke eines `Progress`-Objekts
+        und laeuft damit auf dem Stufe-2-Thread; der lesende Frontend-Handler
+        nimmt denselben Lock wie beim Report-Zustand. Ein Lauf loescht nur
+        SEINEN Eintrag - der eines parallel laufenden neueren Laufs bleibt."""
         with self._report_lock:
-            self._progress = snapshot
+            if snapshot is None:
+                self._progress.pop(out_path, None)
+            else:
+                self._progress[out_path] = snapshot
 
     def last_report(self) -> dict | None:
-        """Thread-sicherer Lese-Zugriff fuer /api/state. Liefert None ohne Report
-        ODER wenn die Datei inzwischen fehlt (manuell geloescht) - so wirft ein
-        toter Link nie einen 500, sondern verschwindet einfach aus dem State.
+        """Thread-sicherer Lese-Zugriff fuer /api/state und
+        /api/postgame/progress. Liefert None ohne Report (auch direkt nach dem
+        Start eines neuen SR-Spiels, s. `observe`) ODER wenn die Datei
+        inzwischen fehlt (manuell geloescht) - so wirft ein toter Link nie einen
+        500, sondern verschwindet einfach aus dem State.
         Sonst {"url": "/reports/<datei>", "written_at": <iso>, "enriched": bool,
         "progress": <Snapshot|None>}.
 
-        `progress` ist der Stand des gerade laufenden Report-Neubaus (Ladebalken
-        im Frontend) und None, sobald keiner laeuft - dann faellt die Anzeige auf
-        den reinen Banner zurueck."""
+        `progress` ist der Stand des gerade laufenden Neubaus GENAU DIESES
+        Reports (Ladebalken im Frontend) und None, sobald fuer ihn keiner
+        laeuft - dann faellt die Anzeige auf den reinen Banner zurueck. Ein noch
+        laufender Stufe-2-Lauf eines aelteren Reports taucht hier nie auf."""
         with self._report_lock:
             rep = self._last_report
             if rep is None:
                 return None
             path, written_at, enriched = (rep["path"], rep["written_at"],
                                           rep["enriched"])
-            progress = self._progress
+            progress = self._progress.get(path)
         if not path.exists():
             return None
         return {"url": f"/reports/{path.name}", "written_at": written_at,
@@ -327,7 +357,15 @@ class PostgameWatcher:
         """Einen Live-Poll verarbeiten. `raw` = `fetch_allgamedata()` (dict) oder
         None (kein Spiel). Aktive SR-Polls fuellen das Capture; die Transition
         'aktiv -> None' loest den Auto-Report aus. Bei deaktiviertem Trigger ein
-        striktes No-Op; Nicht-SR-Spiele werden gar nicht gecapturet."""
+        striktes No-Op; Nicht-SR-Spiele werden gar nicht gecapturet.
+
+        Die Transition 'nicht aktiv -> aktives SR-Spiel' leert den angezeigten
+        Report-Zustand: sonst zeigt der Banner nach dem Ende DIESES Spiels bis
+        zur Fertigstellung seines eigenen Stufe-1-Reports noch auf den Report
+        des vorletzten Spiels, und ein Klick fuehrt in den falschen Report. Die
+        alte Datei (und ihr History-Eintrag) bleibt unberuehrt - nur der
+        Banner-Zeiger faellt weg. Nicht-SR-Spiele leeren bewusst nicht (sie
+        erzeugen keinen eigenen Report, der den alten ersetzen wuerde)."""
         if not self.enabled:
             return
         active = bool(raw) and bool(raw.get("allPlayers"))
@@ -335,6 +373,10 @@ class PostgameWatcher:
             # Nicht-SR (ARAM/Arena/...): nicht capturen, nicht triggern.
             self._was_active = False
             return
+        if active and not self._was_active:
+            # Neues SR-Spiel beginnt -> Banner-Zeiger auf den alten Report weg.
+            with self._report_lock:
+                self._last_report = None
         if active:
             try:
                 self._capture.feed(raw)
@@ -395,8 +437,13 @@ class PostgameWatcher:
         Der Fortschritt gilt genau fuer DIESEN Lauf: er entsteht hier neu und
         wird im `finally` auf jedem Ausgang wieder geloescht (Erfolg, Scheitern,
         Exception). Waehrend der 600-s-Pause bis zum Zweitversuch laeuft nichts,
-        also zeigt das Frontend dort auch keinen Balken."""
-        progress = Progress(plan=_STAGE2_PLAN, on_change=self._set_progress)
+        also zeigt das Frontend dort auch keinen Balken. Er ist an `out_path`
+        gebunden: gehoert der Banner inzwischen zu einem neueren Report, bleibt
+        dieser Balken unsichtbar, und das `finally` raeumt nur den eigenen
+        Eintrag ab."""
+        progress = Progress(
+            plan=_STAGE2_PLAN,
+            on_change=lambda snap: self._set_progress(out_path, snap))
         try:
             # `is_retry`/`progress` als Keyword durchgereicht - der Seam muss sie
             # annehmen (Default-Impl. und Test-Fakes tun das ueber **kw).
@@ -408,10 +455,11 @@ class PostgameWatcher:
                       f"Report bleibt key-frei.")
             enriched = False
         finally:
-            self._set_progress(None)
+            self._set_progress(out_path, None)
         if enriched:
             # Datei wurde in place durch den vollen Match-Report ersetzt ->
-            # Report-Zustand nachziehen, damit der Frontend-Button die Badge zeigt.
+            # Report-Zustand nachziehen, damit der Frontend-Button die Badge zeigt
+            # (No-Op, falls der Banner inzwischen zu einem neueren Spiel gehoert).
             self._set_report(out_path, enriched=True)
             return
         if is_retry:
