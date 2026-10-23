@@ -360,7 +360,13 @@ try {
         Write-Host "Richte die Umgebung ein (uv sync: Python + Abhaengigkeiten) ..."
         & $uvExe sync
         if ($LASTEXITCODE -ne 0) {
-            throw "'uv sync' endete mit Code $LASTEXITCODE."
+            $syncCode = $LASTEXITCODE
+            Write-Host ""
+            Write-Host "Details zum Fehler stehen in der uv-Ausgabe oben."
+            Write-Host "Hinweis: Ein Quellcode-Build bzw. 'Visual C++' dort heisst, dass fuer die"
+            Write-Host "gewaehlte Python-Version keine fertigen Pakete (Wheels) vorliegen -"
+            Write-Host "Python-Pin in .python-version pruefen."
+            throw "'uv sync' endete mit Code $syncCode."
         }
     }
 

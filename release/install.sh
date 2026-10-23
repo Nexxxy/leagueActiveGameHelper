@@ -267,7 +267,10 @@ export UV_CACHE_DIR="$(to_native "$ROOT/astral-uv/cache")"
 if [ "$SYNC" = 1 ]; then
     echo "Richte die Umgebung ein (uv sync: Python + Abhaengigkeiten) ..."
     if ! "$UV_BIN" sync; then
-        echo "FEHLER: 'uv sync' ist fehlgeschlagen." >&2
+        echo "FEHLER: 'uv sync' ist fehlgeschlagen - Details in der uv-Ausgabe oben." >&2
+        echo "Hinweis: Ein Quellcode-Build bzw. 'Visual C++' dort heisst, dass fuer die" >&2
+        echo "gewaehlte Python-Version keine fertigen Pakete (Wheels) vorliegen -" >&2
+        echo "Python-Pin in .python-version pruefen." >&2
         exit 1
     fi
 else
