@@ -1,4 +1,5 @@
 release/.venv/
+release/astral-uv/
 release/server.pid
 release/server.port
 release/server.log

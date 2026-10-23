@@ -31,6 +31,47 @@ if [ -n "$(pids_on_port "$PORT")" ]; then
     exit 1
 fi
 
+# uv aufloesen: PATH -> astral-uv/ (von install.sh / install.bat geladen) ->
+# bekannte Installationsorte. Das Verzeichnis des Fundes kommt vorne in den
+# PATH, damit auch der Hintergrundprozess unten genau dieses uv nimmt.
+ROOT="$(pwd)"
+to_unix() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else echo "$1"; fi
+}
+to_native() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else echo "$1"; fi
+}
+find_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        command -v uv
+        return 0
+    fi
+    local d
+    for d in "$ROOT/astral-uv" "$ROOT/astral-uv/bin" \
+             "${LOCALAPPDATA:+$(to_unix "$LOCALAPPDATA")/Microsoft/WinGet/Links}" \
+             "${USERPROFILE:+$(to_unix "$USERPROFILE")/.local/bin}" \
+             "${HOME:+$HOME/.local/bin}" \
+             "${USERPROFILE:+$(to_unix "$USERPROFILE")/.cargo/bin}" \
+             "${HOME:+$HOME/.cargo/bin}"; do
+        [ -n "$d" ] || continue
+        if [ -f "$d/uv.exe" ]; then echo "$d/uv.exe"; return 0; fi
+        if [ -f "$d/uv" ]; then echo "$d/uv"; return 0; fi
+    done
+    return 1
+}
+if ! UV_BIN="$(find_uv)"; then
+    echo "uv wurde nicht gefunden (weder im PATH noch unter astral-uv/)."
+    echo "Erst ./install.sh (bzw. install.bat unter Windows) ausfuehren."
+    exit 1
+fi
+echo "uv: $UV_BIN"
+export PATH="$(dirname "$UV_BIN"):$PATH"
+
+# Alles lokal halten: managed Python und uv-Cache liegen unter astral-uv/
+# neben den Skripten statt im Benutzerprofil (gilt nur fuer diesen Lauf).
+export UV_PYTHON_INSTALL_DIR="$(to_native "$ROOT/astral-uv/python")"
+export UV_CACHE_DIR="$(to_native "$ROOT/astral-uv/cache")"
+
 # venv synchron halten (uv.lock) - bewusst VOR dem Hintergrundstart, damit
 # eine laengere Erstinstallation nicht den Port-Warte-Timeout unten reisst.
 uv sync || exit 1

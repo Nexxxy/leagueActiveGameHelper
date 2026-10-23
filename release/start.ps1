@@ -1,4 +1,9 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
+    # Intern: start.ps1 ruft sich selbst versteckt mit -ServerChild auf
+    # (base64-kodiertes JSON der Server-Argumente). Nicht von Hand setzen.
+    [string] $ServerChild,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $RemainingArgs
 )
@@ -12,6 +17,29 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 
 Set-Location -LiteralPath $PSScriptRoot
+
+# Kindprozess-Modus: nur den Server starten, keine Elternlogik. PATH und
+# UV_PYTHON_INSTALL_DIR/UV_CACHE_DIR erbt der Kindprozess vom Elternprozess
+# (dort aufgeloest und gesetzt), "uv" wird deshalb blank aufgerufen.
+# Bewusst per -File statt als base64-kodierter Befehl: Microsoft Defender
+# meldet einen versteckten PowerShell-Start mit kodiertem Befehl unter
+# Windows PowerShell 5.1 als Trojan:Win32/Commando.A!ml und blockiert ihn.
+if ($PSBoundParameters.ContainsKey("ServerChild")) {
+    $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ServerChild))
+    $appArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($json)) {
+        $parsedArgs = ConvertFrom-Json -InputObject $json
+        if ($null -ne $parsedArgs) {
+            $appArgs = @($parsedArgs)
+        }
+    }
+    # Stderr des Servers landet im Log; unter Windows PowerShell 5.1 wird es
+    # dabei zu Fehlerdatensaetzen, die mit "Stop" den Kindprozess abbraechen.
+    $ErrorActionPreference = "Continue"
+    & uv run python -u -m app.server @appArgs *> server.log
+    exit $LASTEXITCODE
+}
+
 if ($null -eq $RemainingArgs) {
     $RemainingArgs = [string[]]@()
 } else {
@@ -47,11 +75,6 @@ function Get-PidsOnPort {
     }
 }
 
-function ConvertTo-SingleQuotedLiteral {
-    param([string] $Value)
-    return "'" + ($Value -replace "'", "''") + "'"
-}
-
 $port = 8000
 for ($i = 0; $i -lt $RemainingArgs.Count; $i++) {
     if ($RemainingArgs[$i] -eq "--port" -and ($i + 1) -lt $RemainingArgs.Count) {
@@ -66,11 +89,53 @@ if ($existingPids.Count -gt 0) {
     exit 1
 }
 
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Write-Host "uv wurde nicht gefunden. Installation: winget install astral-sh.uv"
-    Write-Host "Danach PowerShell neu oeffnen und pruefen mit: uv --version"
+# uv aufloesen: PATH -> astral-uv\ (von install.bat / install.ps1 geladen) ->
+# bekannte Installationsorte. Liefert den vollen Pfad zu uv.exe oder $null.
+function Find-Uv {
+    $cmd = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($cmd) {
+        return $cmd.Path
+    }
+
+    $dirs = @(
+        (Join-Path $PSScriptRoot "astral-uv"),
+        (Join-Path $PSScriptRoot "astral-uv\bin")
+    )
+    if ($env:LOCALAPPDATA) {
+        $dirs += (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links")
+    }
+    if ($env:USERPROFILE) {
+        $dirs += (Join-Path $env:USERPROFILE ".local\bin")
+        $dirs += (Join-Path $env:USERPROFILE ".cargo\bin")
+    }
+
+    foreach ($dir in $dirs) {
+        $candidate = Join-Path $dir "uv.exe"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+$uvExe = Find-Uv
+if (-not $uvExe) {
+    Write-Host "uv wurde nicht gefunden (weder im PATH noch unter astral-uv\)."
+    Write-Host "Erst install.bat ausfuehren (Doppelklick oder: .\install.bat)."
     exit 1
 }
+Write-Host "uv: $uvExe"
+
+# Das Verzeichnis des Fundes vorne in den PATH: der versteckte Kindprozess
+# unten erbt die Umgebung und ruft "uv" blank auf.
+$env:PATH = (Split-Path -Parent $uvExe) + [IO.Path]::PathSeparator + $env:PATH
+
+# Alles lokal halten: managed Python und uv-Cache liegen unter astral-uv\
+# neben den Skripten statt im Benutzerprofil (gilt nur fuer diesen Lauf und
+# den Kindprozess).
+$env:UV_PYTHON_INSTALL_DIR = Join-Path $PSScriptRoot "astral-uv\python"
+$env:UV_CACHE_DIR = Join-Path $PSScriptRoot "astral-uv\cache"
 
 & uv sync
 if ($LASTEXITCODE -ne 0) {
@@ -84,22 +149,6 @@ $argsJson = if ($RemainingArgs.Count -gt 0) {
 }
 
 $argsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($argsJson))
-$rootLiteral = ConvertTo-SingleQuotedLiteral -Value $PSScriptRoot
-
-$childScript = @"
-Set-Location -LiteralPath $rootLiteral
-`$json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$argsBase64'))
-`$appArgs = @()
-if (-not [string]::IsNullOrWhiteSpace(`$json)) {
-    `$parsedArgs = ConvertFrom-Json -InputObject `$json
-    if (`$null -ne `$parsedArgs) {
-        `$appArgs = @(`$parsedArgs)
-    }
-}
-& uv run python -u -m app.server @appArgs *> server.log
-"@
-
-$encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
 $powerShellExe = (Get-Process -Id $PID).Path
 if (-not $powerShellExe) {
     $powerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -111,8 +160,14 @@ if (-not $powerShellExe) {
 # gelesen und der Start als gescheitert gemeldet.
 Remove-Item -LiteralPath server.log -Force -ErrorAction SilentlyContinue
 
+# Selbstaufruf im Kindprozess-Modus (s. -ServerChild oben). Start-Process
+# fuegt die Argumente nur mit Leerzeichen zusammen - der Skriptpfad wird
+# deshalb selbst in Anfuehrungszeichen gesetzt (Leerzeichen/Umlaute im Pfad);
+# Base64 enthaelt weder Leerzeichen noch Anfuehrungszeichen.
 $process = Start-Process -FilePath $powerShellExe `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand) `
+    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", ('"' + $PSCommandPath + '"'),
+        "-ServerChild", $argsBase64) `
     -PassThru `
     -WindowStyle Hidden
 
