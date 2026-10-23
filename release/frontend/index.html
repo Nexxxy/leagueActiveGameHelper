@@ -250,6 +250,18 @@
   select { background: var(--bg); color: var(--text); border: 1px solid var(--border);
            border-radius: 6px; padding: 2px 6px; margin-top: 6px; }
   #nogame { margin-top: 40px; text-align: center; color: var(--muted); }
+  /* Wissensbasis-Box des Warte-Bildschirms: wie aktuell sind die Daten, mit
+     denen das naechste Spiel empfohlen wird. Label links, Wert rechts. */
+  #kbbox { max-width: 420px; margin: 18px auto 0; text-align: left; }
+  #kbbox h2 { margin: 0 0 8px; }
+  #kbbox .row { display: flex; justify-content: space-between; gap: 14px;
+                font-size: .9rem; padding: 2px 0; }
+  #kbbox .row .lbl { color: var(--muted); }
+  #kbbox .row .val { color: var(--text); text-align: right;
+                     font-variant-numeric: tabular-nums; }
+  /* Veraltete KB: derselbe warme Ton wie Rueckstand (--minus) - ein Hinweis,
+     keine Fehlermeldung. */
+  #kbbox .row.stale .val { color: var(--minus); font-weight: 600; }
   /* "Match-Report bereit"-Button (Endscreen): grosser, auffaelliger Link auf
      den fertigen Post-Game-Report. Wird nur ausserhalb des laufenden Spiels
      gezeigt (no_game/post_game) - im Spiel hat die Live-Ansicht Vorrang. */
@@ -374,7 +386,12 @@
        renderReport(), sichtbar nur solange der Server einen Snapshot liefert. -->
   <div id="reportProgress" hidden></div>
 
-  <div id="nogame" hidden>Kein aktives Spiel gefunden – warte auf Spielstart …</div>
+  <div id="nogame" hidden>
+    <div>Kein aktives Spiel gefunden – warte auf Spielstart …</div>
+    <!-- Wissensbasis-Box: Inhalt baut renderKb() aus s.kb, nur in Phase
+         no_game (bei post_game ist #nogame ohnehin versteckt). -->
+    <div id="kbbox" class="card" hidden></div>
+  </div>
 
   <div id="game" hidden>
     <!-- Du-Zeile: bewusst ohne Ueberschrift und ohne Karte. Alles Wesentliche
@@ -650,6 +667,45 @@ async function pollProgress() {
   renderReport(rep, lastPhase);
 }
 
+// Wissensbasis-Box des Warte-Bildschirms (s.kb aus /api/state, nur no_game):
+// Patch, Stand (mtime der geladenen builds.yaml), Datenmenge, Erbschaft und -
+// sobald die Start-Pruefung durch ist - der Abgleich mit dem Live-Patch.
+// kb_stale null = offline/noch nicht geprueft -> Zeile entfaellt, statt
+// "aktuell" zu behaupten.
+function renderKb(kb, phase) {
+  const box = document.getElementById("kbbox");
+  if (phase !== "no_game" || !kb) { box.hidden = true; box.innerHTML = ""; return; }
+  const row = (lbl, val, cls = "") =>
+    `<div class="row ${cls}"><span class="lbl">${esc(lbl)}</span><span class="val">${esc(val)}</span></div>`;
+  let html = "<h2>Wissensbasis</h2>";
+  if (!kb.patch) {
+    html += `<div class="muted">Keine Wissensbasis gefunden</div>`;
+  } else {
+    html += row("Patch", kb.patch);
+    if (Number.isFinite(kb.generated_at)) {
+      html += row("Stand", new Date(kb.generated_at * 1000).toLocaleString(
+        "de-DE", { dateStyle: "medium", timeStyle: "short" }));
+    }
+    const data = [];
+    if (Number.isFinite(kb.timelines)) data.push(`${GOLD_FMT.format(kb.timelines)} Timelines`);
+    if (Number.isFinite(kb.matches)) data.push(`${GOLD_FMT.format(kb.matches)} Matches`);
+    if (data.length) html += row("Daten", data.join(" · "));
+    if (kb.inherited_from) {
+      const n = Number.isFinite(kb.champions_inherited)
+        ? `${GOLD_FMT.format(kb.champions_inherited)} Champion-Einträge` : "Einträge";
+      html += row("Geerbt", `${n} aus ${kb.inherited_from}`);
+    }
+    const live = kb.live_patch || kb.live_version;
+    if (kb.kb_stale === false) {
+      html += row("Live-Abgleich", `aktuell (Live ${live})`);
+    } else if (kb.kb_stale === true) {
+      html += row("Live-Abgleich", `veraltet – Live-Patch ist ${live}`, "stale");
+    }
+  }
+  box.innerHTML = html;
+  box.hidden = false;
+}
+
 function render(s) {
   if (s.refresh_seconds) REFRESH_MS = s.refresh_seconds * 1000;
   const game = s.phase === "in_game" || s.phase === "post_game";
@@ -669,6 +725,7 @@ function render(s) {
   // nicht mitgeliefert bekommt (der Mini-Endpunkt kennt nur den Report).
   lastPhase = s.phase;
   renderReport(s.postgame_report, s.phase);
+  renderKb(s.kb, s.phase);
 
   if (!game) return;
 

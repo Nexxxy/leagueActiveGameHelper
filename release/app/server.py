@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from core import ddragon
 from core.config import ROOT, VALID_ROLES, Config
 from engine import (items, knowledge, manifest, profiling, rec_deaths,
                     rec_explain, rec_partner, rec_weights, recommend)
@@ -48,6 +49,10 @@ STATE = {
     # NUTZER-Vorgabe pro Spiel, keine Lage-Erkennung - deshalb OHNE Persistenz:
     # Serverstart und jedes neue Spiel starten wieder bei der Default-Stufe.
     "playstyle": rec_weights.PLAYSTYLE_DEFAULT,
+    # Ergebnis der Live-Patch-Pruefung beim Start (_start_basisinfo_check):
+    # {"live_version", "live_patch", "kb_stale"}. None, solange die Pruefung
+    # laeuft oder fehlgeschlagen ist.
+    "basisinfo": None,
 }
 
 # Serialisiert Zugriffe auf _build_state (Frontend-Handler + Hintergrund-Poller).
@@ -247,6 +252,18 @@ def _playstyle_view() -> dict:
     return {"level": level, "tilt": rec_weights.tilt_for_level(level)}
 
 
+def _kb_info() -> dict:
+    """Wissensbasis-Box des Warte-Bildschirms: Stand der geladenen KB
+    (knowledge.summary) plus Live-Abgleich aus der Start-Pruefung. Die
+    Live-Felder bleiben None, solange die Pruefung nicht durch ist oder
+    offline lief ("nicht geprueft" statt "aktuell")."""
+    info = STATE["basisinfo"] or {}
+    return {**knowledge.summary(),
+            "live_version": info.get("live_version"),
+            "live_patch": info.get("live_patch"),
+            "kb_stale": info.get("kb_stale")}
+
+
 def _build_state() -> dict:
     fetch = demo.fetch_allgamedata if STATE["demo"] else live_client.fetch_allgamedata
     data = fetch()
@@ -275,7 +292,8 @@ def _build_state() -> dict:
                 _export_yaml(last)
             return last
         return {"phase": "no_game", "patch": knowledge.load()["patch"],
-                "patch_inherited_from": knowledge.load()["inherited_from"]}
+                "patch_inherited_from": knowledge.load()["inherited_from"],
+                "kb": _kb_info()}
 
     # Neues Spiel erkennen (gameTime springt deutlich zurueck): Identitaets-Pins
     # zuruecksetzen, damit Champions des neuen Spiels frisch gepinnt werden
@@ -802,13 +820,23 @@ def _start_basisinfo_check() -> None:
     Bewusst in einem Daemon-Thread: `build_manifest` fragt die Data-Dragon-
     Versionsliste ab; ohne Netz laeuft die in einen Timeout und duerfte den
     Serverstart nicht aufhalten. Reiner Hinweis - es wird nichts automatisch
-    nachgeladen oder gecrawlt, und im Frontend erscheint nichts."""
+    nachgeladen oder gecrawlt. Das Ergebnis (Live-Version, KB-Frische) landet
+    zusaetzlich in STATE["basisinfo"]; die Wissensbasis-Box des Warte-
+    Bildschirms zeigt daraus den Live-Abgleich. Bei einem Fehler bleibt das
+    Feld None."""
     def _check() -> None:
         try:
-            hint = manifest.stale_hint(manifest.build_manifest(CFG))
+            result = manifest.build_manifest(CFG)
+            hint = manifest.stale_hint(result)
         except Exception as exc:  # noqa: BLE001 - Diagnose darf nie stoeren
             print(f"Warnung: Basis-Info nicht pruefbar ({exc})")
             return
+        live = result.get("live_version")
+        STATE["basisinfo"] = {
+            "live_version": live,
+            "live_patch": ddragon.patch_of(live) if live else None,
+            "kb_stale": result.get("kb_stale"),
+        }
         if hint:
             print(f"Hinweis: {hint}")
     threading.Thread(target=_check, daemon=True).start()

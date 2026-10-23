@@ -46,14 +46,23 @@ def overrides_path() -> Path:
     return ROOT / "knowledge" / "curated" / "overrides.yaml"
 
 
-def _latest_builds() -> tuple[str, dict]:
+def _latest_builds() -> tuple[str, dict, float | None]:
+    """(patch, builds-Dict, mtime der gelesenen Datei als Epoch-Sekunden).
+    Ohne KB: ("", {"champions": {}}, None)."""
     path = source_path()
     if path is None:
-        return "", {"champions": {}}
+        return "", {"champions": {}}, None
     # Patch-Name aus dem Elternverzeichnis; leer -> "backtest" (gepinnte Quelle
     # ohne Patch-Ordner, nur Backtest/Tests).
     patch = path.parent.name or "backtest"
-    return patch, yamlio.load(path)
+    # mtime VOR dem Lesen festhalten: load() ist gecacht, und die Anzeige soll
+    # zum tatsaechlich geladenen Stand passen - nicht zu einer builds.yaml, die
+    # bei laufendem Server spaeter neu geschrieben wurde.
+    try:
+        generated_at = path.stat().st_mtime
+    except OSError:
+        generated_at = None
+    return patch, yamlio.load(path), generated_at
 
 
 def _overrides() -> dict:
@@ -65,7 +74,7 @@ def _overrides() -> dict:
 
 @lru_cache(maxsize=1)
 def load() -> dict:
-    patch, data = _latest_builds()
+    patch, data, generated_at = _latest_builds()
     champions = data.get("champions", {})
     # Overrides mergen nur Einzelfelder in den Eintrag - `source_patch` (Provenienz
     # aus pipeline/inherit.py) bleibt dabei erhalten, solange ein Override ihn
@@ -81,7 +90,32 @@ def load() -> dict:
             "cc_priors": data.get("cc_priors", {}),
             # Globales Komponenten-Reihenfolge-Aggregat (Feature 001, Fallback-
             # Stufe 2 der Kaufplan-Leiste): {<target_iid als str>: {n, order}}.
-            "component_order_global": data.get("component_order_global", {})}
+            "component_order_global": data.get("component_order_global", {}),
+            # Stand-Angaben fuer die Wissensbasis-Box des Warte-Bildschirms:
+            # Datenmenge (aus pipeline/aggregate), Erb-Zaehler (aus
+            # pipeline/inherit) und der beim Laden erfasste Datei-Zeitstempel.
+            "matches": data.get("matches"),
+            "timelines": data.get("timelines"),
+            "inherited_counts": data.get("inherited_counts") or {},
+            "generated_at": generated_at}
+
+
+def summary() -> dict:
+    """Kompakter Stand der GELADENEN Wissensbasis fuer die Anzeige:
+
+        {patch, generated_at, matches, timelines, inherited_from,
+         champions_inherited}
+
+    `generated_at` ist die mtime der builds.yaml (Epoch-Sekunden) zum
+    Zeitpunkt des Ladens. Fehlende Werte -> None; ohne KB ist `patch` None."""
+    kb = load()
+    return {"patch": kb.get("patch") or None,
+            "generated_at": kb.get("generated_at"),
+            "matches": kb.get("matches"),
+            "timelines": kb.get("timelines"),
+            "inherited_from": kb.get("inherited_from"),
+            "champions_inherited": (kb.get("inherited_counts") or {})
+            .get("champions_inherited")}
 
 
 def component_order_global() -> dict:
